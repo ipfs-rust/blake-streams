@@ -1,513 +1,24 @@
-use anyhow::Result;
-use bao::decode::SliceDecoder;
-use bao::encode::{Encoder, SliceExtractor};
-use fnv::FnvHashSet;
-use parking_lot::Mutex;
-use rkyv::de::deserializers::AllocDeserializer;
-use rkyv::ser::serializers::AlignedSerializer;
-use rkyv::ser::Serializer;
-use rkyv::{AlignedVec, Archive, Deserialize, Serialize};
-use std::convert::TryInto;
-use std::fs::{File, OpenOptions};
-use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
-use std::marker::PhantomData;
-use std::ops::Deref;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-
+pub use crate::buffer::{SliceBuffer, SliceInfo};
+pub use crate::read::StreamReader;
+pub use crate::store::{StreamStorage, ZeroCopy};
+pub use crate::stream::{Head, SignedHead, Slice, Stream, StreamId};
+pub use crate::write::StreamWriter;
 pub use bao::Hash;
 
-#[derive(Archive, Deserialize, Serialize, Clone, Copy, Eq, Hash, PartialEq)]
-pub struct StreamId {
-    pub peer: [u8; 32],
-    pub stream: u64,
-}
-
-impl std::fmt::Debug for StreamId {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        for byte in self.peer.iter() {
-            write!(f, "{:02x}", byte)?;
-        }
-        write!(f, ".{}", self.stream)
-    }
-}
-
-impl std::fmt::Display for StreamId {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{:?}", self)
-    }
-}
-
-impl StreamId {
-    pub fn to_bytes(&self) -> Result<AlignedVec> {
-        let mut ser = AlignedSerializer::new(AlignedVec::new());
-        ser.serialize_value(self)?;
-        Ok(ser.into_inner())
-    }
-}
-
-#[derive(Archive, Deserialize, Serialize, Debug, PartialEq)]
-pub struct Stream {
-    hash: [u8; 32],
-    outboard: Vec<u8>,
-    start: u64,
-    len: u64,
-}
-
-impl Default for Stream {
-    fn default() -> Self {
-        Self {
-            hash: [
-                175, 19, 73, 185, 245, 249, 161, 166, 160, 64, 77, 234, 54, 220, 201, 73, 155, 203,
-                37, 201, 173, 193, 18, 183, 204, 154, 147, 202, 228, 31, 50, 98,
-            ],
-            outboard: vec![0, 0, 0, 0, 0, 0, 0, 0],
-            start: 0,
-            len: 0,
-        }
-    }
-}
-
-impl Stream {
-    pub fn to_bytes(&self) -> Result<AlignedVec> {
-        let mut ser = AlignedSerializer::new(AlignedVec::new());
-        ser.serialize_value(self)?;
-        Ok(ser.into_inner())
-    }
-}
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct ZeroCopy<T> {
-    _marker: PhantomData<T>,
-    ivec: sled::IVec,
-}
-
-impl<T: Archive> ZeroCopy<T> {
-    fn new(ivec: sled::IVec) -> Self {
-        Self {
-            _marker: PhantomData,
-            ivec,
-        }
-    }
-
-    fn to_inner(&self) -> T
-    where
-        T::Archived: Deserialize<T, AllocDeserializer>,
-    {
-        let mut der = AllocDeserializer;
-        self.deserialize(&mut der).unwrap()
-    }
-}
-
-impl<T: Archive> Deref for ZeroCopy<T> {
-    type Target = T::Archived;
-
-    fn deref(&self) -> &Self::Target {
-        unsafe { rkyv::archived_root::<T>(&self.ivec[..]) }
-    }
-}
-
-impl<T> AsRef<[u8]> for ZeroCopy<T> {
-    fn as_ref(&self) -> &[u8] {
-        &self.ivec
-    }
-}
-
-impl<T> From<&ZeroCopy<T>> for sled::IVec {
-    fn from(zc: &ZeroCopy<T>) -> Self {
-        zc.ivec.clone()
-    }
-}
-
-impl<T> std::fmt::Display for ZeroCopy<T>
-where
-    T: Archive + std::fmt::Display,
-    T::Archived: Deserialize<T, AllocDeserializer>,
-{
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        self.to_inner().fmt(f)
-    }
-}
-
-pub struct StreamReader {
-    file: File,
-    start: u64,
-    len: u64,
-    pos: u64,
-}
-
-impl Read for StreamReader {
-    fn read(&mut self, mut buf: &mut [u8]) -> io::Result<usize> {
-        // read from file but within start/len bounds
-        if self.pos >= self.len {
-            return Ok(0);
-        }
-        if buf.len() as u64 >= self.len - self.pos {
-            let (vbuf, _) = buf.split_at_mut((self.len - self.pos).try_into().unwrap());
-            buf = vbuf;
-        }
-        let n = self.file.read(buf)?;
-        self.pos += n as u64;
-        Ok(n)
-    }
-}
-
-impl Seek for StreamReader {
-    fn seek(&mut self, seek: SeekFrom) -> io::Result<u64> {
-        fn add_offset(position: i128, offset: i128) -> io::Result<u64> {
-            let sum = position + offset;
-            if sum < 0 {
-                Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "seek before beginning",
-                ))
-            } else if sum > u64::max_value() as i128 {
-                Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "seek target overflowed u64",
-                ))
-            } else {
-                Ok(sum as u64)
-            }
-        }
-        // seek from file but within start/len bounds
-        let pos = match seek {
-            SeekFrom::Start(start) => start,
-            SeekFrom::Current(current) => add_offset(self.pos as _, current as _)?,
-            SeekFrom::End(end) => add_offset(self.len as _, end as _)?,
-        };
-        let start = add_offset(self.start as _, pos as _)?;
-        self.file.seek(SeekFrom::Start(start))?;
-        self.pos = pos;
-        Ok(self.pos)
-    }
-
-    fn stream_position(&mut self) -> io::Result<u64> {
-        Ok(self.pos)
-    }
-}
-
-pub struct StreamWriter {
-    db: sled::Db,
-    lock: StreamLock,
-    file: File,
-    encoder: Encoder<Cursor<Vec<u8>>>,
-    stream: Stream,
-}
-
-impl StreamWriter {
-    fn new(
-        db: sled::Db,
-        lock: StreamLock,
-        stream: ZeroCopy<Stream>,
-        path: PathBuf,
-    ) -> Result<Self> {
-        let mut file = OpenOptions::new().write(true).create(true).open(path)?;
-        file.seek(SeekFrom::Start(stream.len))?;
-        // TODO restore state of encoder
-        let encoder = Encoder::new_outboard(Cursor::new(vec![]));
-        Ok(StreamWriter {
-            db,
-            lock,
-            file,
-            encoder,
-            stream: stream.to_inner(),
-        })
-    }
-
-    pub fn commit(&mut self) -> Result<Hash> {
-        let (hash, outboard) = self.encoder.clone().finalize()?;
-        self.stream.hash = hash.into();
-        self.stream.outboard = outboard.into_inner();
-        let stream = self
-            .stream
-            .to_bytes()
-            .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?
-            .into_vec();
-        self.db.insert(&self.lock.id, stream)?;
-        Ok(hash)
-    }
-}
-
-impl Write for StreamWriter {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.file.write_all(buf)?;
-        self.encoder.write_all(buf)?;
-        self.stream.len += buf.len() as u64;
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        self.file.flush()?;
-        self.encoder.flush()?;
-        Ok(())
-    }
-}
-
-struct StreamLock {
-    id: ZeroCopy<StreamId>,
-    locks: Arc<Mutex<FnvHashSet<ZeroCopy<StreamId>>>>,
-}
-
-impl Drop for StreamLock {
-    fn drop(&mut self) {
-        let mut locks = self.locks.lock();
-        debug_assert!(locks.remove(&self.id));
-    }
-}
-
-pub struct StreamStorage {
-    db: sled::Db,
-    dir: PathBuf,
-    peer_id: [u8; 32],
-    locks: Arc<Mutex<FnvHashSet<ZeroCopy<StreamId>>>>,
-}
-
-impl StreamStorage {
-    pub fn open(dir: &Path, peer_id: [u8; 32]) -> Result<Self> {
-        let db = sled::open(dir.join("db"))?;
-        let dir = dir.join("streams");
-        std::fs::create_dir(&dir)?;
-        Ok(Self {
-            db,
-            dir,
-            peer_id,
-            locks: Default::default(),
-        })
-    }
-
-    pub fn streams(&self) -> impl Iterator<Item = Result<(ZeroCopy<StreamId>, ZeroCopy<Stream>)>> {
-        self.db.iter().map(|res| {
-            let (k, v) = res?;
-            Ok((ZeroCopy::new(k), ZeroCopy::new(v)))
-        })
-    }
-
-    pub fn create_local_stream(&self) -> Result<ZeroCopy<StreamId>> {
-        let stream = Stream::default().to_bytes()?.into_vec();
-        let key = self.db.transaction::<_, _, sled::Error>(|tx| {
-            let id = StreamId {
-                peer: self.peer_id,
-                stream: tx.generate_id()?,
-            };
-            // TODO: don't unwrap
-            let key = sled::IVec::from(id.to_bytes().unwrap().into_vec());
-            tx.insert(&key, &stream[..])?;
-            Ok(key)
-        })?;
-        Ok(ZeroCopy::new(key))
-    }
-
-    pub fn create_replicated_stream(
-        &self,
-        peer: [u8; 32],
-        stream: u64,
-    ) -> Result<ZeroCopy<StreamId>> {
-        let key = ZeroCopy::new(sled::IVec::from(
-            StreamId { peer, stream }.to_bytes()?.into_vec(),
-        ));
-        let stream = Stream::default().to_bytes()?.into_vec();
-        self.db.transaction::<_, _, sled::Error>(|tx| {
-            tx.insert(&key, &stream[..])?;
-            Ok(())
-        })?;
-        Ok(key)
-    }
-
-    pub fn get_stream(&self, id: &ZeroCopy<StreamId>) -> Result<Option<ZeroCopy<Stream>>> {
-        if let Some(bytes) = self.db.get(id)? {
-            Ok(Some(ZeroCopy::new(bytes)))
-        } else {
-            Ok(None)
-        }
-    }
-
-    fn lock_stream(&self, id: ZeroCopy<StreamId>) -> Result<StreamLock> {
-        if !self.locks.lock().insert(id.clone()) {
-            return Err(anyhow::anyhow!("stream busy"));
-        }
-        Ok(StreamLock {
-            id,
-            locks: self.locks.clone(),
-        })
-    }
-
-    pub fn append(&self, id: &ZeroCopy<StreamId>) -> Result<StreamWriter> {
-        let lock = self.lock_stream(id.clone())?;
-        let stream = if let Some(stream) = self.get_stream(id)? {
-            stream
-        } else {
-            return Err(anyhow::anyhow!("stream doesn't exist"));
-        };
-        Ok(StreamWriter::new(
-            self.db.clone(),
-            lock,
-            stream,
-            self.dir.join(id.to_string()),
-        )?)
-    }
-
-    pub fn remove_stream(&self, id: &ZeroCopy<StreamId>) -> Result<()> {
-        let _lock = self.lock_stream(id.clone())?;
-        // this is safe to do on linux as long as there are only readers.
-        // the file will be deleted after the last reader is dropped.
-        std::fs::remove_file(self.dir.join(id.to_string()))?;
-        self.db.remove(id)?;
-        Ok(())
-    }
-
-    pub fn slice(&self, id: &ZeroCopy<StreamId>, start: u64, len: u64) -> Result<StreamReader> {
-        let stream = if let Some(stream) = self.get_stream(id)? {
-            stream
-        } else {
-            return Err(anyhow::anyhow!("stream doesn't exist"));
-        };
-        if start < stream.start {
-            return Err(anyhow::anyhow!(
-                "trying to read before the start of the stream"
-            ));
-        }
-        if start + len > stream.start + stream.len {
-            return Err(anyhow::anyhow!(
-                "trying to read after the end of the stream"
-            ));
-        }
-        let mut file = File::open(self.dir.join(id.to_string()))?;
-        file.seek(SeekFrom::Start(start - stream.start))?;
-        Ok(StreamReader {
-            file,
-            start: start - stream.start,
-            len,
-            pos: 0,
-        })
-    }
-
-    pub fn extract(
-        &self,
-        id: &ZeroCopy<StreamId>,
-        start: u64,
-        len: u64,
-        buf: &mut Vec<u8>,
-    ) -> Result<()> {
-        let stream = if let Some(stream) = self.get_stream(id)? {
-            stream
-        } else {
-            return Err(anyhow::anyhow!("stream doesn't exist"));
-        };
-        let file = File::open(self.dir.join(id.to_string()))?;
-        let mut extractor =
-            SliceExtractor::new_outboard(file, Cursor::new(&stream.outboard), start, len);
-        extractor.read_to_end(buf)?;
-        Ok(())
-    }
-}
-
-pub struct SliceBuffer {
-    stream: StreamWriter,
-    hash: Hash,
-    slice_len: u64,
-    buf: Vec<u8>,
-    slices: Vec<SliceInfo>,
-    written: u64,
-}
-
-#[derive(Debug)]
-pub struct SliceInfo {
-    pub offset: u64,
-    pub len: u64,
-    pub written: bool,
-}
-
-impl SliceBuffer {
-    pub fn new(stream: StreamWriter, slice_len: u64) -> Self {
-        Self {
-            hash: Hash::from(stream.stream.hash),
-            stream,
-            slice_len,
-            buf: vec![],
-            slices: vec![],
-            written: 0,
-        }
-    }
-
-    pub fn id(&self) -> &ZeroCopy<StreamId> {
-        &self.stream.lock.id
-    }
-
-    pub fn prepare(&mut self, hash: Hash, len: u64) {
-        self.hash = hash;
-        self.slices.clear();
-        self.slices.reserve((len % self.slice_len + 2) as _);
-        let mut pos = self.stream.stream.start + self.stream.stream.len;
-        let end = pos + len;
-        if pos % self.slice_len != 0 {
-            let alignment_slice = u64::min(self.slice_len - pos % self.slice_len, len);
-            self.slices.push(SliceInfo {
-                offset: pos,
-                len: alignment_slice,
-                written: false,
-            });
-            pos += alignment_slice;
-        }
-        while pos + self.slice_len < end {
-            self.slices.push(SliceInfo {
-                offset: pos,
-                len: self.slice_len,
-                written: false,
-            });
-            pos += self.slice_len;
-        }
-        if pos < end {
-            let final_slice = end - pos;
-            self.slices.push(SliceInfo {
-                offset: pos,
-                len: final_slice,
-                written: false,
-            });
-        }
-        self.buf.clear();
-        self.buf.reserve(len as usize);
-        unsafe { self.buf.set_len(len as usize) };
-        self.written = 0;
-    }
-
-    pub fn slices(&self) -> &[SliceInfo] {
-        &self.slices
-    }
-
-    pub fn add_slice(&mut self, slice: &[u8], i: usize) -> Result<()> {
-        let info = &self.slices[i];
-        if info.written {
-            return Ok(());
-        }
-        let mut decoder = SliceDecoder::new(slice, &self.hash, info.offset, info.len);
-        let start = info.offset - self.stream.stream.len - self.stream.stream.start;
-        let end = start + info.len;
-        decoder.read_exact(&mut self.buf[(start as usize)..(end as usize)])?;
-        let mut end = [0u8];
-        assert_eq!(decoder.read(&mut end).unwrap(), 0);
-        self.slices[i].written = true;
-        self.written += 1;
-        Ok(())
-    }
-
-    pub fn commit(&mut self) -> Result<()> {
-        if self.written < self.slices.len() as u64 {
-            return Err(anyhow::anyhow!("missing slices"));
-        }
-        self.stream.write_all(&self.buf)?;
-        self.stream.flush()?;
-        self.stream.commit()?;
-        Ok(())
-    }
-}
+mod buffer;
+mod read;
+mod store;
+mod stream;
+mod write;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Result;
     use bao::decode::SliceDecoder;
+    use ed25519_dalek::{Keypair, PublicKey, SecretKey};
     use rand::RngCore;
-    use std::io::BufReader;
+    use std::io::{BufReader, Read, Write};
     use tempdir::TempDir;
 
     fn rand_bytes(size: usize) -> Vec<u8> {
@@ -518,23 +29,16 @@ mod tests {
         data
     }
 
-    #[test]
-    fn test_default_stream() {
-        let (outboard, hash) = bao::encode::outboard(&[]);
-        let expect = Stream {
-            hash: *hash.as_bytes(),
-            outboard,
-            start: 0,
-            len: 0,
-        };
-        let actual = Stream::default();
-        assert_eq!(actual, expect);
+    fn keypair(secret: [u8; 32]) -> Keypair {
+        let secret = SecretKey::from_bytes(&secret).unwrap();
+        let public = PublicKey::from(&secret);
+        Keypair { secret, public }
     }
 
     #[test]
     fn test_append_stream() -> Result<()> {
         let tmp = TempDir::new("test_append_stream")?;
-        let storage = StreamStorage::open(tmp.path(), [0; 32])?;
+        let storage = StreamStorage::open(tmp.path(), keypair([0; 32]))?;
         let id = storage.create_local_stream()?;
         let data = rand_bytes(1_000_000);
 
@@ -556,7 +60,7 @@ mod tests {
     #[test]
     fn test_extract_slice() -> Result<()> {
         let tmp = TempDir::new("test_extract_slice")?;
-        let storage = StreamStorage::open(tmp.path(), [0; 32])?;
+        let storage = StreamStorage::open(tmp.path(), keypair([0; 32]))?;
         let id = storage.create_local_stream()?;
         let data = rand_bytes(1027);
         let mut stream = storage.append(&id)?;
@@ -586,23 +90,27 @@ mod tests {
     #[test]
     fn test_sync() -> Result<()> {
         let tmp = TempDir::new("test_sync_1")?;
-        let storage = StreamStorage::open(tmp.path(), [0; 32])?;
+        let storage = StreamStorage::open(tmp.path(), keypair([0; 32]))?;
         let id = storage.create_local_stream()?;
         let data = rand_bytes(8192);
         let mut stream = storage.append(&id)?;
-        stream.write_all(&data)?;
+        stream.write_all(&data[..4096])?;
         stream.flush()?;
-        let hash = stream.commit()?;
+        let hash1 = stream.commit()?;
+        stream.write_all(&data[4096..])?;
+        stream.flush()?;
+        let hash2 = stream.commit()?;
 
         let tmp = TempDir::new("test_sync_2")?;
-        let storage2 = StreamStorage::open(tmp.path(), [1; 32])?;
+        let storage2 = StreamStorage::open(tmp.path(), keypair([1; 32]))?;
         let id = storage2.create_replicated_stream(id.peer, id.stream)?;
         let stream = storage2.append(&id)?;
         let mut slices = SliceBuffer::new(stream, 1024);
 
+        let updates = [(hash1, 4096), (hash2, 8192)];
         let mut slice = vec![];
-        for _ in 0..2 {
-            slices.prepare(hash, 4096);
+        for (hash, _len) in &updates {
+            slices.prepare(*hash, 4096);
             println!("{:?}", slices.slices());
             for i in 0..slices.slices().len() {
                 let info = &slices.slices()[i];

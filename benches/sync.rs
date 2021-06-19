@@ -2,6 +2,7 @@ use anyhow::Result;
 use blake_streams::{SliceBuffer, StreamStorage};
 use criterion::measurement::WallTime;
 use criterion::{criterion_group, criterion_main, Bencher, BenchmarkId, Criterion, Throughput};
+use ed25519_dalek::{Keypair, PublicKey, SecretKey};
 use rand::RngCore;
 use std::io::Write;
 use tempdir::TempDir;
@@ -13,6 +14,12 @@ fn rand_bytes(size: usize) -> Vec<u8> {
     data
 }
 
+fn keypair(secret: [u8; 32]) -> Keypair {
+    let secret = SecretKey::from_bytes(&secret).unwrap();
+    let public = PublicKey::from(&secret);
+    Keypair { secret, public }
+}
+
 fn bench_sync(
     b: &mut Bencher<'_, WallTime>,
     slice_len: u64,
@@ -22,7 +29,7 @@ fn bench_sync(
     let tmp = TempDir::new("bench_sync")?;
     let data = rand_bytes(len as usize);
     let path = tmp.path().join("server");
-    let server = StreamStorage::open(&path, [0; 32])?;
+    let server = StreamStorage::open(&path, keypair([0; 32]))?;
     let id = server.create_local_stream()?;
     let mut stream = server.append(&id)?;
     stream.write_all(&data)?;
@@ -33,7 +40,7 @@ fn bench_sync(
         let tmp = TempDir::new("bench_sync").unwrap();
         let path = tmp.path().join(format!("client{}", i));
         i += 1;
-        let client = StreamStorage::open(&path, [1; 32]).unwrap();
+        let client = StreamStorage::open(&path, keypair([1; 32])).unwrap();
         client.create_replicated_stream(id.peer, id.stream).unwrap();
         let stream = client.append(&id).unwrap();
         let mut buffer = SliceBuffer::new(stream, slice_len);
