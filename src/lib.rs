@@ -342,9 +342,9 @@ pub struct SliceBuffer {
 
 #[derive(Debug)]
 pub struct SliceInfo {
-    offset: u64,
-    len: u64,
-    written: bool,
+    pub offset: u64,
+    pub len: u64,
+    pub written: bool,
 }
 
 impl SliceBuffer {

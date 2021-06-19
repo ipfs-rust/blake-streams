@@ -13,8 +13,16 @@ rkyv = "0.6.7"
 sled = "0.34.6"
 
 [dev-dependencies]
+criterion = "0.3.4"
 rand = "0.8.4"
 tempdir = "0.3.7"
+
+[profile.release]
+debug = true
+
+[[bench]]
+name = "sync"
+harness = false
 
 [patch.crates-io]
 bao = { path = "../bao" }
