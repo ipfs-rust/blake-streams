@@ -1,4 +1,5 @@
 use anyhow::Result;
+use bao::decode::SliceDecoder;
 use bao::encode::{Encoder, SliceExtractor};
 use bao::Hash;
 use fnv::FnvHashSet;
@@ -331,6 +332,93 @@ impl StreamStorage {
     }
 }
 
+pub struct SliceBuffer {
+    stream: StreamWriter,
+    hash: Hash,
+    buf: Vec<u8>,
+    slices: Vec<SliceInfo>,
+    written: u64,
+}
+
+#[derive(Debug)]
+pub struct SliceInfo {
+    offset: u64,
+    len: u64,
+    written: bool,
+}
+
+impl SliceBuffer {
+    pub fn new(stream: StreamWriter, hash: Hash, len: u64, slice_len: u64) -> Self {
+        let mut slices = Vec::with_capacity((len % slice_len + 2) as _);
+        let mut pos = stream.stream.start + stream.stream.len;
+        let end = pos + len;
+        if pos % slice_len != 0 {
+            let alignment_slice = u64::min(slice_len - pos % slice_len, len);
+            slices.push(SliceInfo {
+                offset: pos,
+                len: alignment_slice,
+                written: false,
+            });
+            pos += alignment_slice;
+        }
+        while pos + slice_len < end {
+            slices.push(SliceInfo {
+                offset: pos,
+                len: slice_len,
+                written: false,
+            });
+            pos += slice_len;
+        }
+        if pos < end {
+            let final_slice = end - pos;
+            slices.push(SliceInfo {
+                offset: pos,
+                len: final_slice,
+                written: false,
+            });
+        }
+        let mut buf = Vec::with_capacity(len as usize);
+        unsafe { buf.set_len(len as usize) };
+        Self {
+            stream,
+            hash,
+            buf,
+            slices,
+            written: 0,
+        }
+    }
+
+    pub fn slices(&self) -> &[SliceInfo] {
+        &self.slices
+    }
+
+    pub fn add_slice(&mut self, slice: &[u8], i: usize) -> Result<()> {
+        let info = &self.slices[i];
+        if info.written {
+            return Ok(());
+        }
+        let mut decoder = SliceDecoder::new(slice, &self.hash, info.offset, info.len);
+        let start = info.offset as usize;
+        let end = (info.offset + info.len) as usize;
+        decoder.read_exact(&mut self.buf[start..end])?;
+        let mut end = [0u8];
+        assert_eq!(decoder.read(&mut end).unwrap(), 0);
+        self.slices[i].written = true;
+        self.written += 1;
+        Ok(())
+    }
+
+    pub fn commit(&mut self) -> Result<()> {
+        if self.written < self.slices.len() as u64 {
+            return Err(anyhow::anyhow!("missing slices"));
+        }
+        self.stream.write_all(&self.buf)?;
+        self.stream.flush()?;
+        self.stream.commit()?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -394,7 +482,7 @@ mod tests {
         let hash = stream.commit()?;
 
         let offset = 8;
-        let len = 8;
+        let len = 32;
         let slice = data[offset..(offset + len)].to_vec();
 
         let mut stream = storage.slice(id, offset as u64, len as u64)?;
@@ -409,6 +497,40 @@ mod tests {
         let mut decoder = SliceDecoder::new(&*extracted, &hash, offset as u64, len as u64);
         decoder.read_to_end(&mut slice2)?;
         assert_eq!(slice2, slice);
+        Ok(())
+    }
+
+    #[test]
+    fn test_sync() -> Result<()> {
+        let tmp = TempDir::new("test_sync_1")?;
+        let storage = StreamStorage::open(tmp.path())?;
+        let id = storage.create_stream()?;
+        let data = rand_bytes(8192);
+        let mut stream = storage.append(id)?;
+        stream.write_all(&data)?;
+        stream.flush()?;
+        let hash = stream.commit()?;
+
+        let tmp = TempDir::new("test_sync_2")?;
+        let storage2 = StreamStorage::open(tmp.path())?;
+        let id = storage2.create_stream()?;
+        let stream = storage2.append(id)?;
+        let mut slices = SliceBuffer::new(stream, hash, 8192, 1024);
+
+        let mut slice = vec![];
+        for i in 0..slices.slices().len() {
+            let info = &slices.slices()[i];
+            storage.extract(id, info.offset, info.len, &mut slice)?;
+            slices.add_slice(&slice, i)?;
+            slice.clear();
+        }
+
+        slices.commit()?;
+        let mut stream = storage2.slice(id, 0, 8192)?;
+        let mut data2 = vec![];
+        stream.read_to_end(&mut data2)?;
+        assert_eq!(data, data2);
+
         Ok(())
     }
 }
