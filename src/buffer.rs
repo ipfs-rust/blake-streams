@@ -1,11 +1,10 @@
-use crate::{Hash, StreamId, StreamWriter, ZeroCopy};
+use crate::{Hash, Head, Slice, StreamId, StreamWriter, ZeroCopy};
 use anyhow::Result;
 use bao::decode::SliceDecoder;
 use std::io::{Read, Write};
 
 pub struct SliceBuffer {
     stream: StreamWriter,
-    hash: Hash,
     slice_len: u64,
     buf: Vec<u8>,
     slices: Vec<SliceInfo>,
@@ -22,7 +21,6 @@ pub struct SliceInfo {
 impl SliceBuffer {
     pub fn new(stream: StreamWriter, slice_len: u64) -> Self {
         Self {
-            hash: Hash::from(stream.head().hash),
             stream,
             slice_len,
             buf: vec![],
@@ -35,8 +33,11 @@ impl SliceBuffer {
         self.stream.id()
     }
 
-    pub fn prepare(&mut self, hash: Hash, len: u64) {
-        self.hash = hash;
+    pub fn head(&self) -> &Head {
+        self.stream.head()
+    }
+
+    pub fn prepare(&mut self, len: u64) {
         self.slices.clear();
         self.slices.reserve((len % self.slice_len + 2) as _);
         let mut pos = self.stream.head().len;
@@ -76,12 +77,18 @@ impl SliceBuffer {
         &self.slices
     }
 
-    pub fn add_slice(&mut self, slice: &[u8], i: usize) -> Result<()> {
+    pub fn add_slice(&mut self, slice: &Slice, i: usize) -> Result<()> {
+        let head = slice.head.verify(self.stream.id())?;
         let info = &self.slices[i];
         if info.written {
             return Ok(());
         }
-        let mut decoder = SliceDecoder::new(slice, &self.hash, info.offset, info.len);
+        let mut decoder = SliceDecoder::new(
+            &slice.data[..],
+            &Hash::from(head.hash),
+            info.offset,
+            info.len,
+        );
         let start = info.offset - self.stream.head().len;
         let end = start + info.len;
         decoder.read_exact(&mut self.buf[(start as usize)..(end as usize)])?;

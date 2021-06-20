@@ -38,7 +38,7 @@ mod tests {
     #[test]
     fn test_append_stream() -> Result<()> {
         let tmp = TempDir::new("test_append_stream")?;
-        let storage = StreamStorage::open(tmp.path(), keypair([0; 32]))?;
+        let storage = StreamStorage::open(tmp.path(), keypair([0; 32]).public)?;
         let id = storage.create_local_stream()?;
         let data = rand_bytes(1_000_000);
 
@@ -60,13 +60,14 @@ mod tests {
     #[test]
     fn test_extract_slice() -> Result<()> {
         let tmp = TempDir::new("test_extract_slice")?;
-        let storage = StreamStorage::open(tmp.path(), keypair([0; 32]))?;
+        let key = keypair([0; 32]);
+        let storage = StreamStorage::open(tmp.path(), key.public)?;
         let id = storage.create_local_stream()?;
         let data = rand_bytes(1027);
         let mut stream = storage.append(&id)?;
         stream.write_all(&data)?;
         stream.flush()?;
-        let hash = stream.commit()?;
+        stream.commit()?;
 
         let offset = 8;
         let len = 32;
@@ -77,11 +78,17 @@ mod tests {
         stream.read_to_end(&mut slice2)?;
         assert_eq!(slice2, slice);
 
-        let mut extracted = vec![];
-        storage.extract(&id, offset as u64, len as u64, &mut extracted)?;
+        let mut vslice = Slice::default();
+        storage.extract(&id, offset as u64, len as u64, &mut vslice)?;
 
         let mut slice2 = vec![];
-        let mut decoder = SliceDecoder::new(&*extracted, &hash, offset as u64, len as u64);
+        let head = vslice.head.verify(&id)?;
+        let mut decoder = SliceDecoder::new(
+            &vslice.data[..],
+            &Hash::from(head.hash),
+            offset as u64,
+            len as u64,
+        );
         decoder.read_to_end(&mut slice2)?;
         assert_eq!(slice2, slice);
         Ok(())
@@ -90,35 +97,38 @@ mod tests {
     #[test]
     fn test_sync() -> Result<()> {
         let tmp = TempDir::new("test_sync_1")?;
-        let storage = StreamStorage::open(tmp.path(), keypair([0; 32]))?;
+        let key = keypair([0; 32]);
+        let storage = StreamStorage::open(tmp.path(), key.public)?;
         let id = storage.create_local_stream()?;
         let data = rand_bytes(8192);
         let mut stream = storage.append(&id)?;
         stream.write_all(&data[..4096])?;
         stream.flush()?;
-        let hash1 = stream.commit()?;
+        let head1 = stream.commit()?.sign(&key)?;
         stream.write_all(&data[4096..])?;
         stream.flush()?;
-        let hash2 = stream.commit()?;
+        let head2 = stream.commit()?.sign(&key)?;
 
         let tmp = TempDir::new("test_sync_2")?;
-        let storage2 = StreamStorage::open(tmp.path(), keypair([1; 32]))?;
+        let key2 = keypair([1; 32]);
+        let storage2 = StreamStorage::open(tmp.path(), key2.public)?;
         let id = storage2.create_replicated_stream(id.peer, id.stream)?;
         let stream = storage2.append(&id)?;
-        let mut slices = SliceBuffer::new(stream, 1024);
+        let mut buffer = SliceBuffer::new(stream, 1024);
 
-        let updates = [(hash1, 4096), (hash2, 8192)];
-        let mut slice = vec![];
-        for (hash, _len) in &updates {
-            slices.prepare(*hash, 4096);
-            println!("{:?}", slices.slices());
-            for i in 0..slices.slices().len() {
-                let info = &slices.slices()[i];
+        let mut slice = Slice::default();
+        for head in [head1, head2].iter() {
+            let head = head.verify(&id)?;
+            buffer.prepare(head.len - buffer.head().len);
+            println!("{:?}", buffer.slices());
+            for i in 0..buffer.slices().len() {
+                let info = &buffer.slices()[i];
                 storage.extract(&id, info.offset, info.len, &mut slice)?;
-                slices.add_slice(&slice, i)?;
-                slice.clear();
+                println!("extracted");
+                buffer.add_slice(&slice, i)?;
+                println!("verified");
             }
-            slices.commit()?;
+            buffer.commit()?;
         }
 
         let mut stream = storage2.slice(&id, 0, 8192)?;

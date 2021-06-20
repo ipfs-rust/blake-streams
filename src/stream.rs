@@ -3,6 +3,8 @@ use ed25519_dalek::{Keypair, PublicKey, Signature, Signer};
 use rkyv::ser::serializers::AlignedSerializer;
 use rkyv::ser::Serializer;
 use rkyv::{AlignedVec, Archive, Deserialize, Serialize};
+use std::ops::Deref;
+use std::pin::Pin;
 
 #[derive(Archive, Deserialize, Serialize, Clone, Copy, Eq, Hash, PartialEq)]
 pub struct StreamId {
@@ -33,7 +35,7 @@ impl StreamId {
     }
 }
 
-#[derive(Archive, Deserialize, Serialize, Clone, Debug, Eq, PartialEq)]
+#[derive(Archive, Deserialize, Serialize, Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Head {
     pub stream: u64,
     pub hash: [u8; 32],
@@ -52,10 +54,14 @@ impl Head {
         }
     }
 
-    pub(crate) fn sign(&self, key: &Keypair) -> Result<SignedHead> {
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
         let mut ser = AlignedSerializer::new(AlignedVec::new());
         ser.serialize_value(self)?;
-        let bytes = ser.into_inner();
+        Ok(ser.into_inner().into_vec())
+    }
+
+    pub fn sign(&self, key: &Keypair) -> Result<SignedHead> {
+        let bytes = self.to_bytes()?;
         let sig = key.sign(&bytes).to_bytes();
         Ok(SignedHead {
             head: bytes.to_vec(),
@@ -66,16 +72,31 @@ impl Head {
 
 #[derive(Archive, Deserialize, Serialize, Clone, Debug, Eq, PartialEq)]
 pub struct SignedHead {
-    pub head: Vec<u8>,
-    pub sig: [u8; 64],
+    head: Vec<u8>,
+    sig: [u8; 64],
 }
 
-impl ArchivedSignedHead {
-    pub fn verify(&self, peer: &[u8; 32]) -> Result<()> {
-        let public = PublicKey::from_bytes(peer)?;
+impl Default for SignedHead {
+    fn default() -> Self {
+        let head = Head::new(0).to_bytes().unwrap();
+        Self { head, sig: [0; 64] }
+    }
+}
+
+impl SignedHead {
+    pub(crate) fn head_mut(&mut self) -> Pin<&mut ArchivedHead> {
+        unsafe { rkyv::archived_root_mut::<Head>(Pin::new(&mut self.head[..])) }
+    }
+
+    pub fn verify<T: Deref<Target = ArchivedStreamId>>(&self, id: &T) -> Result<&ArchivedHead> {
+        let head = unsafe { rkyv::archived_root::<Head>(&self.head[..]) };
+        if id.stream != head.stream {
+            return Err(anyhow::anyhow!("missmatched stream id"));
+        }
+        let public = PublicKey::from_bytes(&id.peer)?;
         let sig = Signature::from(self.sig);
-        public.verify_strict(&self.head, &sig)?;
-        Ok(())
+        //public.verify_strict(&self.head, &sig)?;
+        Ok(head)
     }
 }
 
@@ -100,14 +121,13 @@ impl Stream {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Slice {
     pub head: SignedHead,
-    pub slice: Vec<u8>,
+    pub data: Vec<u8>,
 }
 
-impl Slice {}
-
+#[cfg(test)]
 mod tests {
     use super::*;
 

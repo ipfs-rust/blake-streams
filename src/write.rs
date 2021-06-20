@@ -1,5 +1,5 @@
 use crate::store::StreamLock;
-use crate::{Hash, Head, Stream, StreamId, ZeroCopy};
+use crate::{Head, Stream, StreamId, ZeroCopy};
 use anyhow::Result;
 use bao::encode::Encoder;
 use std::fs::{File, OpenOptions};
@@ -42,7 +42,7 @@ impl StreamWriter {
         &self.stream.head
     }
 
-    pub fn commit(&mut self) -> Result<Hash> {
+    pub fn commit(&mut self) -> Result<Head> {
         let (hash, outboard) = self.encoder.clone().finalize()?;
         self.stream.head.hash = hash.into();
         self.stream.outboard = outboard.into_inner();
@@ -52,7 +52,7 @@ impl StreamWriter {
             .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?
             .into_vec();
         self.db.insert(self.id(), stream)?;
-        Ok(hash)
+        Ok(self.stream.head)
     }
 }
 

@@ -1,7 +1,7 @@
-use crate::{Stream, StreamId, StreamReader, StreamWriter};
+use crate::{Slice, Stream, StreamId, StreamReader, StreamWriter};
 use anyhow::Result;
 use bao::encode::SliceExtractor;
-use ed25519_dalek::Keypair;
+use ed25519_dalek::PublicKey;
 use fnv::FnvHashSet;
 use parking_lot::Mutex;
 use rkyv::de::deserializers::AllocDeserializer;
@@ -87,19 +87,19 @@ impl Drop for StreamLock {
 pub struct StreamStorage {
     db: sled::Db,
     dir: PathBuf,
-    key: Arc<Keypair>,
+    key: PublicKey,
     locks: Arc<Mutex<FnvHashSet<ZeroCopy<StreamId>>>>,
 }
 
 impl StreamStorage {
-    pub fn open(dir: &Path, key: Keypair) -> Result<Self> {
+    pub fn open(dir: &Path, key: PublicKey) -> Result<Self> {
         let db = sled::open(dir.join("db"))?;
         let dir = dir.join("streams");
         std::fs::create_dir(&dir)?;
         Ok(Self {
             db,
             dir,
-            key: Arc::new(key),
+            key,
             locks: Default::default(),
         })
     }
@@ -112,7 +112,7 @@ impl StreamStorage {
     }
 
     pub fn create_local_stream(&self) -> Result<ZeroCopy<StreamId>> {
-        let peer = self.key.public.to_bytes();
+        let peer = self.key.to_bytes();
         let stream = self
             .db
             .transaction::<_, _, sled::Error>(|tx| Ok(tx.generate_id()?))?;
@@ -189,17 +189,22 @@ impl StreamStorage {
         id: &ZeroCopy<StreamId>,
         start: u64,
         len: u64,
-        buf: &mut Vec<u8>,
+        slice: &mut Slice,
     ) -> Result<()> {
+        slice.data.clear();
         let stream = if let Some(stream) = self.get_stream(id)? {
             stream
         } else {
             return Err(anyhow::anyhow!("stream doesn't exist"));
         };
         let file = File::open(self.dir.join(id.to_string()))?;
+        let mut head = slice.head.head_mut();
+        head.stream = stream.head.stream;
+        head.hash = stream.head.hash;
+        head.len = stream.head.len;
         let mut extractor =
             SliceExtractor::new_outboard(file, Cursor::new(&stream.outboard), start, len);
-        extractor.read_to_end(buf)?;
+        extractor.read_to_end(&mut slice.data)?;
         Ok(())
     }
 }
