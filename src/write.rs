@@ -5,7 +5,7 @@ use bao::encode::Encoder;
 use ed25519_dalek::Keypair;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Cursor, Read, Write};
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::Arc;
 use zerocopy::AsBytes;
 
@@ -20,7 +20,7 @@ pub struct StreamWriter<T> {
 
 impl<T> StreamWriter<T> {
     pub(crate) fn new(
-        path: PathBuf,
+        path: &Path,
         stream: Stream,
         lock: StreamLock,
         db: sled::Db,

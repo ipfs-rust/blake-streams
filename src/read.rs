@@ -3,7 +3,7 @@ use anyhow::Result;
 use std::convert::TryInto;
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
-use std::path::PathBuf;
+use std::path::Path;
 
 pub struct StreamReader {
     file: File,
@@ -13,7 +13,7 @@ pub struct StreamReader {
 }
 
 impl StreamReader {
-    pub(crate) fn new(path: PathBuf, head: &Head, start: u64, len: u64) -> Result<Self> {
+    pub(crate) fn new(path: &Path, head: &Head, start: u64, len: u64) -> Result<Self> {
         if start + len > head.len {
             return Err(anyhow::anyhow!(
                 "trying to read after the end of the stream"

@@ -3,7 +3,7 @@ use crate::{SignedHead, Slice, Stream, StreamId, StreamReader, StreamWriter};
 use anyhow::Result;
 use bao::encode::SliceExtractor;
 use ed25519_dalek::Keypair;
-use fnv::FnvHashSet;
+use fnv::{FnvHashMap, FnvHashSet};
 use parking_lot::Mutex;
 use rkyv::{Archive, Deserialize, Infallible};
 use std::fs::File;
@@ -61,6 +61,7 @@ pub struct StreamStorage {
     dir: PathBuf,
     key: Arc<Keypair>,
     locks: Arc<Mutex<FnvHashSet<StreamId>>>,
+    paths: FnvHashMap<StreamId, PathBuf>,
 }
 
 impl StreamStorage {
@@ -73,6 +74,7 @@ impl StreamStorage {
             dir,
             key: Arc::new(key),
             locks: Default::default(),
+            paths: Default::default(),
         })
     }
 
@@ -89,6 +91,13 @@ impl StreamStorage {
             return Err(anyhow::anyhow!("stream busy"));
         }
         Ok(StreamLock::new(id, self.locks.clone()))
+    }
+
+    fn stream_path(&mut self, id: &StreamId) -> &Path {
+        if !self.paths.contains_key(id) {
+            self.paths.insert(*id, self.dir.join(id.to_string()));
+        }
+        self.paths.get(id).unwrap()
     }
 
     pub fn streams(&self) -> impl Iterator<Item = Result<(StreamId, SignedHead)>> {
@@ -117,65 +126,63 @@ impl StreamStorage {
         Ok(())
     }
 
-    pub fn append_local_stream(&self, id: &StreamId) -> Result<StreamWriter<Arc<Keypair>>> {
+    pub fn append_local_stream(&mut self, id: &StreamId) -> Result<StreamWriter<Arc<Keypair>>> {
         let lock = self.lock_stream(id.clone())?;
         let stream = if let Some(stream) = self.get_stream(id)? {
             stream
         } else {
             return Err(anyhow::anyhow!("stream doesn't exist"));
         };
-        Ok(StreamWriter::new(
-            self.dir.join(id.to_string()),
-            stream.to_inner(),
-            lock,
-            self.db.clone(),
-            self.key.clone(),
-        )?)
+        let db = self.db.clone();
+        let key = self.key.clone();
+        let path = self.stream_path(id);
+        Ok(StreamWriter::new(path, stream.to_inner(), lock, db, key)?)
     }
 
-    pub fn append_replicated_stream(&self, id: &StreamId) -> Result<StreamWriter<()>> {
+    pub fn append_replicated_stream(&mut self, id: &StreamId) -> Result<StreamWriter<()>> {
         let lock = self.lock_stream(id.clone())?;
         let stream = if let Some(stream) = self.get_stream(id)? {
             stream
         } else {
             return Err(anyhow::anyhow!("stream doesn't exist"));
         };
-        Ok(StreamWriter::new(
-            self.dir.join(id.to_string()),
-            stream.to_inner(),
-            lock,
-            self.db.clone(),
-            (),
-        )?)
+        let db = self.db.clone();
+        let path = self.stream_path(id);
+        Ok(StreamWriter::new(path, stream.to_inner(), lock, db, ())?)
     }
 
-    pub fn remove_stream(&self, id: &StreamId) -> Result<()> {
+    pub fn remove_stream(&mut self, id: &StreamId) -> Result<()> {
         let _lock = self.lock_stream(id.clone())?;
         // this is safe to do on linux as long as there are only readers.
         // the file will be deleted after the last reader is dropped.
-        std::fs::remove_file(self.dir.join(id.to_string()))?;
+        std::fs::remove_file(self.stream_path(id))?;
         self.db.remove(id.as_bytes())?;
         Ok(())
     }
 
-    pub fn slice(&self, id: &StreamId, start: u64, len: u64) -> Result<StreamReader> {
+    pub fn slice(&mut self, id: &StreamId, start: u64, len: u64) -> Result<StreamReader> {
         let stream = if let Some(stream) = self.get_stream(id)? {
             stream
         } else {
             return Err(anyhow::anyhow!("stream doesn't exist"));
         };
-        let path = self.dir.join(id.to_string());
-        StreamReader::new(path, &stream.head.head, start, len)
+        StreamReader::new(self.stream_path(id), &stream.head.head, start, len)
     }
 
-    pub fn extract(&self, id: &StreamId, start: u64, len: u64, slice: &mut Slice) -> Result<()> {
+    pub fn extract(
+        &mut self,
+        id: &StreamId,
+        start: u64,
+        len: u64,
+        slice: &mut Slice,
+    ) -> Result<()> {
         slice.data.clear();
         let stream = if let Some(stream) = self.get_stream(id)? {
             stream
         } else {
             return Err(anyhow::anyhow!("stream doesn't exist"));
         };
-        let file = File::open(self.dir.join(id.to_string()))?;
+        let file = File::open(self.stream_path(id))?;
         slice.head = stream.head;
         let mut extractor =
             SliceExtractor::new_outboard(file, Cursor::new(&stream.outboard), start, len);

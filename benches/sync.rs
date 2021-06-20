@@ -29,7 +29,7 @@ fn bench_sync(
     let tmp = TempDir::new("bench_sync")?;
     let data = rand_bytes(len as usize);
     let path = tmp.path().join("server");
-    let server = StreamStorage::open(&path, keypair([0; 32]))?;
+    let mut server = StreamStorage::open(&path, keypair([0; 32]))?;
     let id = server.create_local_stream()?;
     let mut stream = server.append_local_stream(&id)?;
     stream.write_all(&data)?;
@@ -40,7 +40,7 @@ fn bench_sync(
         let tmp = TempDir::new("bench_sync").unwrap();
         let path = tmp.path().join(format!("client{}", i));
         i += 1;
-        let client = StreamStorage::open(&path, keypair([1; 32])).unwrap();
+        let mut client = StreamStorage::open(&path, keypair([1; 32])).unwrap();
         client.create_replicated_stream(&id).unwrap();
         let stream = client.append_replicated_stream(&id).unwrap();
         let mut buffer = SliceBuffer::new(stream, slice_len);

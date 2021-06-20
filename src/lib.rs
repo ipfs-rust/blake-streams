@@ -38,7 +38,7 @@ mod tests {
     #[test]
     fn test_append_stream() -> Result<()> {
         let tmp = TempDir::new("test_append_stream")?;
-        let storage = StreamStorage::open(tmp.path(), keypair([0; 32]))?;
+        let mut storage = StreamStorage::open(tmp.path(), keypair([0; 32]))?;
         let id = storage.create_local_stream()?;
         let data = rand_bytes(1_000_000);
 
@@ -60,7 +60,7 @@ mod tests {
     #[test]
     fn test_extract_slice() -> Result<()> {
         let tmp = TempDir::new("test_extract_slice")?;
-        let storage = StreamStorage::open(tmp.path(), keypair([0; 32]))?;
+        let mut storage = StreamStorage::open(tmp.path(), keypair([0; 32]))?;
         let id = storage.create_local_stream()?;
         let data = rand_bytes(1027);
         let mut stream = storage.append_local_stream(&id)?;
@@ -96,7 +96,7 @@ mod tests {
     #[test]
     fn test_sync() -> Result<()> {
         let tmp = TempDir::new("test_sync_1")?;
-        let storage = StreamStorage::open(tmp.path(), keypair([0; 32]))?;
+        let mut storage = StreamStorage::open(tmp.path(), keypair([0; 32]))?;
         let id = storage.create_local_stream()?;
         let data = rand_bytes(8192);
         let mut stream = storage.append_local_stream(&id)?;
@@ -108,7 +108,7 @@ mod tests {
         let head2 = stream.commit()?;
 
         let tmp = TempDir::new("test_sync_2")?;
-        let storage2 = StreamStorage::open(tmp.path(), keypair([1; 32]))?;
+        let mut storage2 = StreamStorage::open(tmp.path(), keypair([1; 32]))?;
         storage2.create_replicated_stream(&id)?;
         let stream = storage2.append_replicated_stream(&id)?;
         let mut buffer = SliceBuffer::new(stream, 1024);
@@ -131,7 +131,7 @@ mod tests {
         assert_eq!(data, data2);
 
         let tmp = TempDir::new("test_sync_3")?;
-        let storage = StreamStorage::open(tmp.path(), keypair([1; 32]))?;
+        let mut storage = StreamStorage::open(tmp.path(), keypair([1; 32]))?;
         storage.create_replicated_stream(&id)?;
         let stream = storage.append_replicated_stream(&id)?;
         let mut buffer = SliceBuffer::new(stream, 1024);

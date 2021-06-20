@@ -24,7 +24,7 @@ fn main() -> Result<()> {
     let tmp = TempDir::new("sync")?;
     let data = rand_bytes(len as usize);
     let path = tmp.path().join("server");
-    let server = StreamStorage::open(&path, keypair([0; 32]))?;
+    let mut server = StreamStorage::open(&path, keypair([0; 32]))?;
     let id = server.create_local_stream()?;
     let mut stream = server.append_local_stream(&id)?;
     stream.write_all(&data)?;
@@ -32,7 +32,7 @@ fn main() -> Result<()> {
     stream.commit()?;
 
     let path = tmp.path().join("client");
-    let client = StreamStorage::open(&path, keypair([1; 32]))?;
+    let mut client = StreamStorage::open(&path, keypair([1; 32]))?;
     client.create_replicated_stream(&id)?;
     let stream = client.append_replicated_stream(&id)?;
     let mut buffer = SliceBuffer::new(stream, slice_len);
