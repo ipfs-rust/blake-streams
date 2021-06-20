@@ -1,15 +1,19 @@
 use anyhow::Result;
 use ed25519_dalek::{Keypair, PublicKey, Signature, Signer};
+use fnv::FnvHashSet;
+use parking_lot::Mutex;
 use rkyv::ser::serializers::AlignedSerializer;
 use rkyv::ser::Serializer;
 use rkyv::{AlignedVec, Archive, Deserialize, Serialize};
-use std::ops::Deref;
-use std::pin::Pin;
+use std::sync::Arc;
+use zerocopy::AsBytes;
 
-#[derive(Archive, Deserialize, Serialize, Clone, Copy, Eq, Hash, PartialEq)]
+#[derive(Archive, Deserialize, Serialize, AsBytes, Clone, Copy, Eq, Hash, PartialEq)]
+#[archive(as = "StreamId")]
+#[repr(C)]
 pub struct StreamId {
-    pub peer: [u8; 32],
-    pub stream: u64,
+    peer: [u8; 32],
+    stream: u64,
 }
 
 impl std::fmt::Debug for StreamId {
@@ -28,24 +32,48 @@ impl std::fmt::Display for StreamId {
 }
 
 impl StreamId {
-    pub fn to_bytes(&self) -> Result<AlignedVec> {
-        let mut ser = AlignedSerializer::new(AlignedVec::new());
-        ser.serialize_value(self)?;
-        Ok(ser.into_inner())
+    pub fn peer(&self) -> PublicKey {
+        PublicKey::from_bytes(&self.peer).unwrap()
+    }
+
+    pub fn stream(&self) -> u64 {
+        self.stream
     }
 }
 
-#[derive(Archive, Deserialize, Serialize, Clone, Copy, Debug, Default, Eq, PartialEq)]
+impl StreamId {
+    pub(crate) fn new(peer: [u8; 32], stream: u64) -> Self {
+        Self { peer, stream }
+    }
+}
+
+#[derive(Archive, Deserialize, Serialize, AsBytes, Clone, Copy, Debug, Eq, PartialEq)]
+#[archive(as = "Head")]
+#[repr(C)]
 pub struct Head {
-    pub stream: u64,
-    pub hash: [u8; 32],
-    pub len: u64,
+    pub(crate) id: StreamId,
+    pub(crate) hash: [u8; 32],
+    pub(crate) len: u64,
 }
 
 impl Head {
-    pub(crate) fn new(stream: u64) -> Self {
+    pub fn id(&self) -> &StreamId {
+        &self.id
+    }
+
+    pub fn hash(&self) -> &[u8; 32] {
+        &self.hash
+    }
+
+    pub fn len(&self) -> u64 {
+        self.len
+    }
+}
+
+impl Head {
+    pub(crate) fn new(id: StreamId) -> Self {
         Self {
-            stream,
+            id,
             hash: [
                 175, 19, 73, 185, 245, 249, 161, 166, 160, 64, 77, 234, 54, 220, 201, 73, 155, 203,
                 37, 201, 173, 193, 18, 183, 204, 154, 147, 202, 228, 31, 50, 98,
@@ -53,63 +81,84 @@ impl Head {
             len: 0,
         }
     }
-
-    pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        let mut ser = AlignedSerializer::new(AlignedVec::new());
-        ser.serialize_value(self)?;
-        Ok(ser.into_inner().into_vec())
-    }
-
-    pub fn sign(&self, key: &Keypair) -> Result<SignedHead> {
-        let bytes = self.to_bytes()?;
-        let sig = key.sign(&bytes).to_bytes();
-        Ok(SignedHead {
-            head: bytes.to_vec(),
-            sig,
-        })
-    }
 }
 
-#[derive(Archive, Deserialize, Serialize, Clone, Debug, Eq, PartialEq)]
+#[derive(Archive, Deserialize, Serialize, AsBytes, Clone, Copy, Debug, Eq, PartialEq)]
+#[archive(as = "SignedHead")]
+#[repr(C)]
 pub struct SignedHead {
-    head: Vec<u8>,
+    pub(crate) head: Head,
     sig: [u8; 64],
 }
 
 impl Default for SignedHead {
     fn default() -> Self {
-        let head = Head::new(0).to_bytes().unwrap();
-        Self { head, sig: [0; 64] }
+        Self::new(StreamId {
+            peer: [0; 32],
+            stream: 0,
+        })
     }
 }
 
 impl SignedHead {
-    pub(crate) fn head_mut(&mut self) -> Pin<&mut ArchivedHead> {
-        unsafe { rkyv::archived_root_mut::<Head>(Pin::new(&mut self.head[..])) }
+    pub fn head(&self) -> &Head {
+        &self.head
     }
 
-    pub fn verify<T: Deref<Target = ArchivedStreamId>>(&self, id: &T) -> Result<&ArchivedHead> {
-        let head = unsafe { rkyv::archived_root::<Head>(&self.head[..]) };
-        if id.stream != head.stream {
+    pub fn sig(&self) -> &[u8; 64] {
+        &self.sig
+    }
+
+    pub fn verify(&self, id: &StreamId) -> Result<()> {
+        if id != self.head().id() {
             return Err(anyhow::anyhow!("missmatched stream id"));
         }
-        let public = PublicKey::from_bytes(&id.peer)?;
         let sig = Signature::from(self.sig);
-        //public.verify_strict(&self.head, &sig)?;
-        Ok(head)
+        id.peer().verify_strict(self.head.as_bytes(), &sig)?;
+        Ok(())
+    }
+}
+
+impl SignedHead {
+    pub(crate) fn new(id: StreamId) -> Self {
+        Self {
+            head: Head::new(id),
+            sig: [0; 64],
+        }
+    }
+
+    pub(crate) fn sign(&mut self, key: &Keypair) {
+        debug_assert_eq!(key.public, self.head.id().peer());
+        self.sig = key.sign(self.head.as_bytes()).to_bytes();
+    }
+
+    pub(crate) fn set_signature(&mut self, sig: [u8; 64]) -> Result<()> {
+        let sig2 = Signature::from(sig);
+        self.head
+            .id()
+            .peer()
+            .verify_strict(self.head.as_bytes(), &sig2)?;
+        self.sig = sig;
+        Ok(())
     }
 }
 
 #[derive(Archive, Deserialize, Serialize, Clone, Debug, Eq, PartialEq)]
 pub struct Stream {
-    pub head: Head,
-    pub outboard: Vec<u8>,
+    pub(crate) head: SignedHead,
+    pub(crate) outboard: Vec<u8>,
 }
 
 impl Stream {
-    pub(crate) fn new(stream: u64) -> Self {
+    pub fn head(&self) -> &Head {
+        self.head.head()
+    }
+}
+
+impl Stream {
+    pub(crate) fn new(id: StreamId) -> Self {
         Self {
-            head: Head::new(stream),
+            head: SignedHead::new(id),
             outboard: vec![0, 0, 0, 0, 0, 0, 0, 0],
         }
     }
@@ -127,6 +176,24 @@ pub struct Slice {
     pub data: Vec<u8>,
 }
 
+pub(crate) struct StreamLock {
+    id: StreamId,
+    locks: Arc<Mutex<FnvHashSet<StreamId>>>,
+}
+
+impl StreamLock {
+    pub fn new(id: StreamId, locks: Arc<Mutex<FnvHashSet<StreamId>>>) -> Self {
+        Self { id, locks }
+    }
+}
+
+impl Drop for StreamLock {
+    fn drop(&mut self) {
+        let mut locks = self.locks.lock();
+        debug_assert!(locks.remove(&self.id));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,15 +201,19 @@ mod tests {
     #[test]
     fn test_default_stream() {
         let (outboard, hash) = bao::encode::outboard(&[]);
+        let id = StreamId::new([0; 32], 42);
         let expect = Stream {
-            head: Head {
-                stream: 42,
-                hash: *hash.as_bytes(),
-                len: 0,
+            head: SignedHead {
+                head: Head {
+                    id,
+                    hash: *hash.as_bytes(),
+                    len: 0,
+                },
+                sig: [0; 64],
             },
             outboard,
         };
-        let actual = Stream::new(42);
+        let actual = Stream::new(id);
         assert_eq!(actual, expect);
     }
 }

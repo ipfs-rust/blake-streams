@@ -1,6 +1,6 @@
 pub use crate::buffer::{SliceBuffer, SliceInfo};
 pub use crate::read::StreamReader;
-pub use crate::store::{StreamStorage, ZeroCopy};
+pub use crate::store::StreamStorage;
 pub use crate::stream::{Head, SignedHead, Slice, Stream, StreamId};
 pub use crate::write::StreamWriter;
 pub use bao::Hash;
@@ -38,11 +38,11 @@ mod tests {
     #[test]
     fn test_append_stream() -> Result<()> {
         let tmp = TempDir::new("test_append_stream")?;
-        let storage = StreamStorage::open(tmp.path(), keypair([0; 32]).public)?;
+        let storage = StreamStorage::open(tmp.path(), keypair([0; 32]))?;
         let id = storage.create_local_stream()?;
         let data = rand_bytes(1_000_000);
 
-        let mut stream = storage.append(&id)?;
+        let mut stream = storage.append_local_stream(&id)?;
         stream.write_all(&data)?;
         stream.flush()?;
         stream.commit()?;
@@ -60,11 +60,10 @@ mod tests {
     #[test]
     fn test_extract_slice() -> Result<()> {
         let tmp = TempDir::new("test_extract_slice")?;
-        let key = keypair([0; 32]);
-        let storage = StreamStorage::open(tmp.path(), key.public)?;
+        let storage = StreamStorage::open(tmp.path(), keypair([0; 32]))?;
         let id = storage.create_local_stream()?;
         let data = rand_bytes(1027);
-        let mut stream = storage.append(&id)?;
+        let mut stream = storage.append_local_stream(&id)?;
         stream.write_all(&data)?;
         stream.flush()?;
         stream.commit()?;
@@ -82,10 +81,10 @@ mod tests {
         storage.extract(&id, offset as u64, len as u64, &mut vslice)?;
 
         let mut slice2 = vec![];
-        let head = vslice.head.verify(&id)?;
+        vslice.head.verify(&id)?;
         let mut decoder = SliceDecoder::new(
             &vslice.data[..],
-            &Hash::from(head.hash),
+            &Hash::from(vslice.head.head.hash),
             offset as u64,
             len as u64,
         );
@@ -97,29 +96,27 @@ mod tests {
     #[test]
     fn test_sync() -> Result<()> {
         let tmp = TempDir::new("test_sync_1")?;
-        let key = keypair([0; 32]);
-        let storage = StreamStorage::open(tmp.path(), key.public)?;
+        let storage = StreamStorage::open(tmp.path(), keypair([0; 32]))?;
         let id = storage.create_local_stream()?;
         let data = rand_bytes(8192);
-        let mut stream = storage.append(&id)?;
+        let mut stream = storage.append_local_stream(&id)?;
         stream.write_all(&data[..4096])?;
         stream.flush()?;
-        let head1 = stream.commit()?.sign(&key)?;
+        let head1 = stream.commit()?;
         stream.write_all(&data[4096..])?;
         stream.flush()?;
-        let head2 = stream.commit()?.sign(&key)?;
+        let head2 = stream.commit()?;
 
         let tmp = TempDir::new("test_sync_2")?;
-        let key2 = keypair([1; 32]);
-        let storage2 = StreamStorage::open(tmp.path(), key2.public)?;
-        let id = storage2.create_replicated_stream(id.peer, id.stream)?;
-        let stream = storage2.append(&id)?;
+        let storage2 = StreamStorage::open(tmp.path(), keypair([1; 32]))?;
+        storage2.create_replicated_stream(&id)?;
+        let stream = storage2.append_replicated_stream(&id)?;
         let mut buffer = SliceBuffer::new(stream, 1024);
 
         let mut slice = Slice::default();
         for head in [head1, head2].iter() {
-            let head = head.verify(&id)?;
-            buffer.prepare(head.len - buffer.head().len);
+            head.verify(&id)?;
+            buffer.prepare(head.head().len() - buffer.head().len);
             println!("{:?}", buffer.slices());
             for i in 0..buffer.slices().len() {
                 let info = &buffer.slices()[i];
@@ -128,7 +125,7 @@ mod tests {
                 buffer.add_slice(&slice, i)?;
                 println!("verified");
             }
-            buffer.commit()?;
+            buffer.commit(*head.sig())?;
         }
 
         let mut stream = storage2.slice(&id, 0, 8192)?;

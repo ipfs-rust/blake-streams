@@ -1,4 +1,4 @@
-use crate::{Stream, ZeroCopy};
+use crate::Head;
 use anyhow::Result;
 use std::convert::TryInto;
 use std::fs::File;
@@ -13,13 +13,8 @@ pub struct StreamReader {
 }
 
 impl StreamReader {
-    pub(crate) fn new(
-        path: PathBuf,
-        stream: ZeroCopy<Stream>,
-        start: u64,
-        len: u64,
-    ) -> Result<Self> {
-        if start + len > stream.head.len {
+    pub(crate) fn new(path: PathBuf, head: &Head, start: u64, len: u64) -> Result<Self> {
+        if start + len > head.len {
             return Err(anyhow::anyhow!(
                 "trying to read after the end of the stream"
             ));

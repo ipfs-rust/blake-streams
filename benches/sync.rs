@@ -1,5 +1,5 @@
 use anyhow::Result;
-use blake_streams::{SliceBuffer, StreamStorage};
+use blake_streams::{Slice, SliceBuffer, StreamStorage};
 use criterion::measurement::WallTime;
 use criterion::{criterion_group, criterion_main, Bencher, BenchmarkId, Criterion, Throughput};
 use ed25519_dalek::{Keypair, PublicKey, SecretKey};
@@ -31,32 +31,32 @@ fn bench_sync(
     let path = tmp.path().join("server");
     let server = StreamStorage::open(&path, keypair([0; 32]))?;
     let id = server.create_local_stream()?;
-    let mut stream = server.append(&id)?;
+    let mut stream = server.append_local_stream(&id)?;
     stream.write_all(&data)?;
     stream.flush()?;
-    let hash = stream.commit()?;
+    stream.commit()?;
     let mut i = 0;
     b.iter(|| {
         let tmp = TempDir::new("bench_sync").unwrap();
         let path = tmp.path().join(format!("client{}", i));
         i += 1;
         let client = StreamStorage::open(&path, keypair([1; 32])).unwrap();
-        client.create_replicated_stream(id.peer, id.stream).unwrap();
-        let stream = client.append(&id).unwrap();
+        client.create_replicated_stream(&id).unwrap();
+        let stream = client.append_replicated_stream(&id).unwrap();
         let mut buffer = SliceBuffer::new(stream, slice_len);
 
-        let mut slice = Vec::with_capacity(slice_len as usize * 2);
+        let mut slice = Slice::default();
+        slice.data.reserve(slice_len as usize * 2);
         for _ in 0..(len / prepare_len) {
-            buffer.prepare(hash, prepare_len);
+            buffer.prepare(prepare_len);
             for i in 0..buffer.slices().len() {
                 let info = &buffer.slices()[i];
                 server
                     .extract(&id, info.offset, info.len, &mut slice)
                     .unwrap();
                 buffer.add_slice(&slice, i).unwrap();
-                slice.clear();
             }
-            buffer.commit().unwrap();
+            buffer.commit(*slice.head.sig()).unwrap();
         }
     });
     Ok(())
