@@ -1,6 +1,7 @@
 use crate::{Hash, Head, Slice, StreamId, StreamWriter};
 use anyhow::Result;
 use bao::decode::SliceDecoder;
+use fnv::FnvHashSet;
 use std::io::{Read, Write};
 
 pub struct SliceBuffer {
@@ -9,6 +10,7 @@ pub struct SliceBuffer {
     buf: Vec<u8>,
     slices: Vec<SliceInfo>,
     written: u64,
+    hashes: FnvHashSet<[u8; 32]>,
 }
 
 #[derive(Debug)]
@@ -26,6 +28,7 @@ impl SliceBuffer {
             buf: vec![],
             slices: vec![],
             written: 0,
+            hashes: Default::default(),
         }
     }
 
@@ -78,8 +81,11 @@ impl SliceBuffer {
     }
 
     pub fn add_slice(&mut self, slice: &Slice, i: usize) -> Result<()> {
-        slice.head.verify(self.stream.id())?;
         let head = slice.head.head();
+        if !self.hashes.contains(head.hash()) {
+            slice.head.verify(self.stream.id())?;
+            self.hashes.insert(*head.hash());
+        }
         let info = &self.slices[i];
         if info.written {
             return Ok(());
