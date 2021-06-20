@@ -117,18 +117,38 @@ mod tests {
         for head in [head1, head2].iter() {
             head.verify(&id)?;
             buffer.prepare(head.head().len() - buffer.head().len);
-            println!("{:?}", buffer.slices());
             for i in 0..buffer.slices().len() {
                 let info = &buffer.slices()[i];
                 storage.extract(&id, info.offset, info.len, &mut slice)?;
-                println!("extracted");
                 buffer.add_slice(&slice, i)?;
-                println!("verified");
             }
             buffer.commit(*head.sig())?;
         }
 
         let mut stream = storage2.slice(&id, 0, 8192)?;
+        let mut data2 = vec![];
+        stream.read_to_end(&mut data2)?;
+        assert_eq!(data, data2);
+
+        let tmp = TempDir::new("test_sync_3")?;
+        let storage = StreamStorage::open(tmp.path(), keypair([1; 32]))?;
+        storage.create_replicated_stream(&id)?;
+        let stream = storage.append_replicated_stream(&id)?;
+        let mut buffer = SliceBuffer::new(stream, 1024);
+
+        let mut slice = Slice::default();
+        for head in [head1, head2].iter() {
+            head.verify(&id)?;
+            buffer.prepare(head.head().len() - buffer.head().len);
+            for i in 0..buffer.slices().len() {
+                let info = &buffer.slices()[i];
+                storage2.extract(&id, info.offset, info.len, &mut slice)?;
+                buffer.add_slice(&slice, i)?;
+            }
+            buffer.commit(*head.sig())?;
+        }
+
+        let mut stream = storage.slice(&id, 0, 8192)?;
         let mut data2 = vec![];
         stream.read_to_end(&mut data2)?;
         assert_eq!(data, data2);
