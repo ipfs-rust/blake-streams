@@ -25,26 +25,24 @@ fn main() -> Result<()> {
     let data = rand_bytes(len as usize);
     let path = tmp.path().join("server");
     let mut server = StreamStorage::open(&path, keypair([0; 32]))?;
-    let id = server.create_local_stream()?;
-    let mut stream = server.append_local_stream(&id)?;
+    let mut stream = server.append(0)?;
     stream.write_all(&data)?;
     stream.flush()?;
-    stream.commit()?;
+    let head = stream.commit()?;
 
     let path = tmp.path().join("client");
     let mut client = StreamStorage::open(&path, keypair([1; 32]))?;
-    client.create_replicated_stream(&id)?;
-    let stream = client.append_replicated_stream(&id)?;
-    let mut buffer = SliceBuffer::new(stream, slice_len);
+    let stream = client.subscribe(stream.id())?;
+    let mut stream = SliceBuffer::new(stream, slice_len);
 
     let mut slice = Slice::default();
-    buffer.prepare(len);
-    for i in 0..buffer.slices().len() {
-        let info = &buffer.slices()[i];
-        server.extract(&id, info.offset, info.len, &mut slice)?;
-        buffer.add_slice(&slice, i)?;
+    stream.prepare(len);
+    for i in 0..stream.slices().len() {
+        let info = &stream.slices()[i];
+        server.extract(stream.id(), info.offset, info.len, &mut slice)?;
+        stream.add_slice(&slice, i)?;
     }
-    buffer.commit(*slice.head.sig())?;
+    stream.commit(*head.sig())?;
 
     Ok(())
 }

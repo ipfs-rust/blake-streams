@@ -1,4 +1,4 @@
-use crate::{Hash, Head, Slice, StreamId, StreamWriter};
+use crate::{Hash, Head, SignedHead, Slice, StreamId, StreamWriter};
 use anyhow::Result;
 use bao::decode::SliceDecoder;
 use fnv::FnvHashSet;
@@ -36,14 +36,15 @@ impl SliceBuffer {
         self.stream.id()
     }
 
-    pub fn head(&self) -> &Head {
-        self.stream.head().head()
+    pub fn head(&self) -> &SignedHead {
+        self.stream.head()
     }
 
     pub fn prepare(&mut self, len: u64) {
+        assert!(self.commitable());
         self.slices.clear();
         self.slices.reserve((len % self.slice_len + 2) as _);
-        let mut pos = self.head().len();
+        let mut pos = self.head().head().len();
         let end = pos + len;
         if pos % self.slice_len != 0 {
             let alignment_slice = u64::min(self.slice_len - pos % self.slice_len, len);
@@ -96,7 +97,7 @@ impl SliceBuffer {
             info.offset,
             info.len,
         );
-        let start = info.offset - self.head().len();
+        let start = info.offset - self.head().head().len();
         let end = start + info.len;
         decoder.read_exact(&mut self.buf[(start as usize)..(end as usize)])?;
         let mut end = [0u8];
@@ -106,13 +107,21 @@ impl SliceBuffer {
         Ok(())
     }
 
-    pub fn commit(&mut self, sig: [u8; 64]) -> Result<()> {
-        if self.written < self.slices.len() as u64 {
+    pub fn commitable(&self) -> bool {
+        self.written >= self.slices.len() as u64
+    }
+
+    pub fn write_buffer(&mut self) -> Result<()> {
+        if !self.commitable() {
             return Err(anyhow::anyhow!("missing slices"));
         }
         self.stream.write_all(&self.buf)?;
-        self.stream.flush()?;
-        self.stream.commit(sig)?;
         Ok(())
+    }
+
+    pub fn commit(&mut self, sig: [u8; 64]) -> Result<Head> {
+        self.write_buffer()?;
+        self.stream.flush()?;
+        Ok(self.stream.commit(sig)?)
     }
 }

@@ -30,33 +30,31 @@ fn bench_sync(
     let data = rand_bytes(len as usize);
     let path = tmp.path().join("server");
     let mut server = StreamStorage::open(&path, keypair([0; 32]))?;
-    let id = server.create_local_stream()?;
-    let mut stream = server.append_local_stream(&id)?;
+    let mut stream = server.append(0)?;
     stream.write_all(&data)?;
     stream.flush()?;
-    stream.commit()?;
+    let head = stream.commit()?;
     let mut i = 0;
     b.iter(|| {
         let tmp = TempDir::new("bench_sync").unwrap();
         let path = tmp.path().join(format!("client{}", i));
         i += 1;
         let mut client = StreamStorage::open(&path, keypair([1; 32])).unwrap();
-        client.create_replicated_stream(&id).unwrap();
-        let stream = client.append_replicated_stream(&id).unwrap();
-        let mut buffer = SliceBuffer::new(stream, slice_len);
+        let stream = client.subscribe(stream.id()).unwrap();
+        let mut stream = SliceBuffer::new(stream, slice_len);
 
         let mut slice = Slice::default();
         slice.data.reserve(slice_len as usize * 2);
         for _ in 0..(len / prepare_len) {
-            buffer.prepare(prepare_len);
-            for i in 0..buffer.slices().len() {
-                let info = &buffer.slices()[i];
+            stream.prepare(prepare_len);
+            for i in 0..stream.slices().len() {
+                let info = &stream.slices()[i];
                 server
-                    .extract(&id, info.offset, info.len, &mut slice)
+                    .extract(stream.id(), info.offset, info.len, &mut slice)
                     .unwrap();
-                buffer.add_slice(&slice, i).unwrap();
+                stream.add_slice(&slice, i).unwrap();
             }
-            buffer.commit(*slice.head.sig()).unwrap();
+            stream.commit(*head.sig()).unwrap();
         }
     });
     Ok(())

@@ -123,7 +123,7 @@ impl StreamStorage {
     pub fn append(&mut self, stream: u64) -> Result<StreamWriter<Arc<Keypair>>> {
         let peer = self.key.public.to_bytes();
         let id = StreamId::new(peer, stream);
-        if self.contains(&id)? {
+        if !self.contains(&id)? {
             let stream = Stream::new(id).to_bytes()?.into_vec();
             self.db.insert(id.as_bytes(), &stream[..])?;
         }
@@ -140,7 +140,7 @@ impl StreamStorage {
     }
 
     pub fn subscribe(&mut self, id: &StreamId) -> Result<StreamWriter<()>> {
-        if self.contains(id)? {
+        if !self.contains(id)? {
             let stream = Stream::new(*id).to_bytes()?.into_vec();
             self.db.insert(id.as_bytes(), &stream[..])?;
         }
@@ -186,6 +186,9 @@ impl StreamStorage {
         } else {
             return Err(anyhow::anyhow!("stream doesn't exist"));
         };
+        if len > stream.head.head().len() {
+            return Err(anyhow::anyhow!("trying to read after current head"));
+        }
         let file = File::open(self.stream_path(id))?;
         slice.head = stream.head;
         let mut extractor =

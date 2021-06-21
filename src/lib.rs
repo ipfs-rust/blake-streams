@@ -110,7 +110,7 @@ mod tests {
         let mut slice = Slice::default();
         for head in [head1, head2].iter() {
             head.verify(stream.id())?;
-            stream.prepare(head.head().len() - stream.head().len);
+            stream.prepare(head.head().len() - stream.head().head().len);
             for i in 0..stream.slices().len() {
                 let info = &stream.slices()[i];
                 storage.extract(stream.id(), info.offset, info.len, &mut slice)?;
@@ -131,8 +131,8 @@ mod tests {
 
         let mut slice = Slice::default();
         for head in [head1, head2].iter() {
-            head.verify(stream.id())?;
-            stream.prepare(head.head().len() - stream.head().len);
+            head.verify(stream.id()).unwrap();
+            stream.prepare(head.head().len() - stream.head().head().len);
             for i in 0..stream.slices().len() {
                 let info = &stream.slices()[i];
                 storage2.extract(stream.id(), info.offset, info.len, &mut slice)?;
