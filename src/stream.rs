@@ -11,6 +11,7 @@ use zerocopy::AsBytes;
 #[derive(Archive, Deserialize, Serialize, AsBytes, Clone, Copy, Eq, Hash, PartialEq)]
 #[archive(as = "StreamId")]
 #[repr(C)]
+#[cfg_attr(feature = "serde-derive", derive(serde::Deserialize, serde::Serialize))]
 pub struct StreamId {
     peer: [u8; 32],
     stream: u64,
@@ -32,6 +33,10 @@ impl std::fmt::Display for StreamId {
 }
 
 impl StreamId {
+    pub fn new(peer: [u8; 32], stream: u64) -> Self {
+        Self { peer, stream }
+    }
+
     pub fn peer(&self) -> PublicKey {
         PublicKey::from_bytes(&self.peer).unwrap()
     }
@@ -41,15 +46,10 @@ impl StreamId {
     }
 }
 
-impl StreamId {
-    pub(crate) fn new(peer: [u8; 32], stream: u64) -> Self {
-        Self { peer, stream }
-    }
-}
-
 #[derive(Archive, Deserialize, Serialize, AsBytes, Clone, Copy, Debug, Eq, PartialEq)]
 #[archive(as = "Head")]
 #[repr(C)]
+#[cfg_attr(feature = "serde-derive", derive(serde::Deserialize, serde::Serialize))]
 pub struct Head {
     pub(crate) id: StreamId,
     pub(crate) hash: [u8; 32],
@@ -86,8 +86,10 @@ impl Head {
 #[derive(Archive, Deserialize, Serialize, AsBytes, Clone, Copy, Debug, Eq, PartialEq)]
 #[archive(as = "SignedHead")]
 #[repr(C)]
+#[cfg_attr(feature = "serde-derive", derive(serde::Deserialize, serde::Serialize))]
 pub struct SignedHead {
     pub(crate) head: Head,
+    #[cfg_attr(feature = "serde-derive", serde(with = "serde_big_array::BigArray"))]
     sig: [u8; 64],
 }
 
@@ -171,6 +173,7 @@ impl Stream {
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[cfg_attr(feature = "serde-derive", derive(serde::Deserialize, serde::Serialize))]
 pub struct Slice {
     pub head: SignedHead,
     pub data: Vec<u8>,

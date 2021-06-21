@@ -4,6 +4,7 @@ pub use crate::store::StreamStorage;
 pub use crate::stream::{Head, SignedHead, Slice, Stream, StreamId};
 pub use crate::write::StreamWriter;
 pub use bao::Hash;
+pub use ed25519_dalek::{Keypair, PublicKey, SecretKey};
 
 mod buffer;
 mod read;
@@ -16,7 +17,6 @@ mod tests {
     use super::*;
     use anyhow::Result;
     use bao::decode::SliceDecoder;
-    use ed25519_dalek::{Keypair, PublicKey, SecretKey};
     use rand::RngCore;
     use std::io::{BufReader, Read, Write};
     use tempdir::TempDir;

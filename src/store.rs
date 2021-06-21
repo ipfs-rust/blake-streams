@@ -1,5 +1,5 @@
 use crate::stream::StreamLock;
-use crate::{SignedHead, Slice, Stream, StreamId, StreamReader, StreamWriter};
+use crate::{Head, Slice, Stream, StreamId, StreamReader, StreamWriter};
 use anyhow::Result;
 use bao::encode::SliceExtractor;
 use ed25519_dalek::Keypair;
@@ -100,14 +100,19 @@ impl StreamStorage {
         self.paths.get(id).unwrap()
     }
 
-    pub fn streams(&self) -> impl Iterator<Item = Result<(StreamId, SignedHead)>> {
-        self.db.iter().map(|res| {
-            let (k, v) = res?;
-            let id = ZeroCopy::<StreamId>::new(k);
-            let stream = ZeroCopy::<Stream>::new(v);
-            let head = stream.head.deserialize(&mut Infallible)?;
-            Ok((id.to_inner(), head))
+    pub fn streams(&self) -> impl Iterator<Item = Result<StreamId>> {
+        self.db.iter().keys().map(|res| {
+            Ok(ZeroCopy::<StreamId>::new(res?).to_inner())
         })
+    }
+
+    pub fn head(&self, id: &StreamId) -> Result<Option<Head>> {
+        if let Some(stream) = self.db.get(id.as_bytes())? {
+            let stream = ZeroCopy::<Stream>::new(stream);
+            let head = stream.head.head().deserialize(&mut Infallible)?;
+            return Ok(Some(head));
+        }
+        Ok(None)
     }
 
     pub fn create_local_stream(&self) -> Result<StreamId> {
@@ -127,6 +132,7 @@ impl StreamStorage {
     }
 
     pub fn append_local_stream(&mut self, id: &StreamId) -> Result<StreamWriter<Arc<Keypair>>> {
+        assert_eq!(id.peer(), self.key.public);
         let lock = self.lock_stream(id.clone())?;
         let stream = if let Some(stream) = self.get_stream(id)? {
             stream
