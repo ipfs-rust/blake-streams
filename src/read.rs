@@ -1,4 +1,4 @@
-use crate::Head;
+use crate::{Head, StreamId};
 use anyhow::Result;
 use std::convert::TryInto;
 use std::fs::File;
@@ -7,6 +7,7 @@ use std::path::Path;
 
 pub struct StreamReader {
     file: File,
+    id: StreamId,
     start: u64,
     len: u64,
     pos: u64,
@@ -23,10 +24,15 @@ impl StreamReader {
         file.seek(SeekFrom::Start(start))?;
         Ok(Self {
             file,
+            id: head.id,
             start,
             len,
             pos: 0,
         })
+    }
+
+    pub fn id(&self) -> &StreamId {
+        &self.id
     }
 }
 

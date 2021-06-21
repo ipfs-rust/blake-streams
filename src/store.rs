@@ -101,9 +101,14 @@ impl StreamStorage {
     }
 
     pub fn streams(&self) -> impl Iterator<Item = Result<StreamId>> {
-        self.db.iter().keys().map(|res| {
-            Ok(ZeroCopy::<StreamId>::new(res?).to_inner())
-        })
+        self.db
+            .iter()
+            .keys()
+            .map(|res| Ok(ZeroCopy::<StreamId>::new(res?).to_inner()))
+    }
+
+    pub fn contains(&self, id: &StreamId) -> Result<bool> {
+        Ok(self.db.contains_key(id.as_bytes())?)
     }
 
     pub fn head(&self, id: &StreamId) -> Result<Option<Head>> {
@@ -115,37 +120,30 @@ impl StreamStorage {
         Ok(None)
     }
 
-    pub fn create_local_stream(&self) -> Result<StreamId> {
+    pub fn append(&mut self, stream: u64) -> Result<StreamWriter<Arc<Keypair>>> {
         let peer = self.key.public.to_bytes();
-        let stream = self
-            .db
-            .transaction::<_, _, sled::Error>(|tx| Ok(tx.generate_id()?))?;
         let id = StreamId::new(peer, stream);
-        self.create_replicated_stream(&id)?;
-        Ok(id)
-    }
-
-    pub fn create_replicated_stream(&self, id: &StreamId) -> Result<()> {
-        let stream = Stream::new(*id).to_bytes()?.into_vec();
-        self.db.insert(id.as_bytes(), &stream[..])?;
-        Ok(())
-    }
-
-    pub fn append_local_stream(&mut self, id: &StreamId) -> Result<StreamWriter<Arc<Keypair>>> {
-        assert_eq!(id.peer(), self.key.public);
+        if self.contains(&id)? {
+            let stream = Stream::new(id).to_bytes()?.into_vec();
+            self.db.insert(id.as_bytes(), &stream[..])?;
+        }
         let lock = self.lock_stream(id.clone())?;
-        let stream = if let Some(stream) = self.get_stream(id)? {
+        let stream = if let Some(stream) = self.get_stream(&id)? {
             stream
         } else {
             return Err(anyhow::anyhow!("stream doesn't exist"));
         };
         let db = self.db.clone();
         let key = self.key.clone();
-        let path = self.stream_path(id);
+        let path = self.stream_path(&id);
         Ok(StreamWriter::new(path, stream.to_inner(), lock, db, key)?)
     }
 
-    pub fn append_replicated_stream(&mut self, id: &StreamId) -> Result<StreamWriter<()>> {
+    pub fn subscribe(&mut self, id: &StreamId) -> Result<StreamWriter<()>> {
+        if self.contains(id)? {
+            let stream = Stream::new(*id).to_bytes()?.into_vec();
+            self.db.insert(id.as_bytes(), &stream[..])?;
+        }
         let lock = self.lock_stream(id.clone())?;
         let stream = if let Some(stream) = self.get_stream(id)? {
             stream
@@ -157,7 +155,7 @@ impl StreamStorage {
         Ok(StreamWriter::new(path, stream.to_inner(), lock, db, ())?)
     }
 
-    pub fn remove_stream(&mut self, id: &StreamId) -> Result<()> {
+    pub fn remove(&mut self, id: &StreamId) -> Result<()> {
         let _lock = self.lock_stream(id.clone())?;
         // this is safe to do on linux as long as there are only readers.
         // the file will be deleted after the last reader is dropped.

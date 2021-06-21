@@ -179,6 +179,15 @@ pub struct Slice {
     pub data: Vec<u8>,
 }
 
+impl Slice {
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            head: Default::default(),
+            data: Vec::with_capacity(capacity),
+        }
+    }
+}
+
 pub(crate) struct StreamLock {
     id: StreamId,
     locks: Arc<Mutex<FnvHashSet<StreamId>>>,
