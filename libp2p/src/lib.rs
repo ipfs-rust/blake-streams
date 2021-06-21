@@ -56,10 +56,15 @@
 //! # Ok(()) }
 //! ```
 use anyhow::Result;
-use blake_streams::{Head, SignedHead, Slice, SliceBuffer, StreamId, StreamReader, StreamWriter, StreamStorage, Keypair};
+use blake_streams::{
+    Head, Keypair, SignedHead, Slice, SliceBuffer, StreamId, StreamReader, StreamStorage,
+    StreamWriter,
+};
 use fnv::{FnvHashMap, FnvHashSet};
-use libp2p::core::connection::{ConnectionId, ConnectedPoint};
-use libp2p::streaming_response::{Codec, StreamingResponse, StreamingResponseConfig, StreamingResponseEvent};
+use libp2p::core::connection::{ConnectedPoint, ConnectionId};
+use libp2p::streaming_response::{
+    ChannelId, Codec, StreamingResponse, StreamingResponseConfig, StreamingResponseEvent,
+};
 use libp2p::swarm::{
     IntoProtocolsHandler, NetworkBehaviour, NetworkBehaviourAction, PollParameters,
     ProtocolsHandler,
@@ -68,9 +73,9 @@ use libp2p::{Multiaddr, PeerId};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::io::{self, Write};
-use std::task::{Context, Poll};
-use std::sync::Arc;
 use std::path::Path;
+use std::sync::Arc;
+use std::task::{Context, Poll};
 
 pub struct LocalStreamWriter {
     inner: StreamWriter<Arc<Keypair>>,
@@ -115,8 +120,6 @@ pub struct StreamSyncRequest {
     stream: StreamId,
     start: u64,
     len: u64,
-    slice_len: u32,
-    nth: u8,
 }
 
 pub enum StreamSyncEvent {
@@ -144,17 +147,27 @@ pub struct StreamSync {
     store: StreamStorage,
     streams: FnvHashMap<StreamId, ReplicatedStream>,
     events: VecDeque<StreamSyncEvent>,
+    slice_len: usize,
+    slice: Slice,
 }
 
 impl StreamSync {
-    pub fn open(path: &Path, key: Keypair) -> Result<Self> {
+    pub fn open(path: &Path, key: Keypair, slice_len: usize) -> Result<Self> {
         let inner = StreamingResponse::new(StreamingResponseConfig::default());
         let store = StreamStorage::open(path, key)?;
-        Ok(Self { inner, store, streams: Default::default(), events: Default::default() })
+        let slice = Slice::with_capacity(slice_len);
+        Ok(Self {
+            inner,
+            store,
+            streams: Default::default(),
+            events: Default::default(),
+            slice,
+            slice_len,
+        })
     }
 
-    pub fn create(&mut self) -> Result<StreamId> {
-        self.store.create_local_stream()
+    pub fn streams(&mut self) -> Result<Vec<StreamId>> {
+        self.store.streams().collect()
     }
 
     pub fn head(&mut self, id: &StreamId) -> Result<Option<Head>> {
@@ -166,19 +179,20 @@ impl StreamSync {
     }
 
     pub fn remove(&mut self, id: &StreamId) -> Result<()> {
-        self.store.remove_stream(id)
+        self.store.remove(id)
     }
 
-    pub fn append(&mut self, id: &StreamId) -> Result<LocalStreamWriter> {
-        Ok(LocalStreamWriter { inner: self.store.append_local_stream(id)? })
+    pub fn append(&mut self, id: u64) -> Result<LocalStreamWriter> {
+        Ok(LocalStreamWriter {
+            inner: self.store.append(id)?,
+        })
     }
 
-    pub fn streams(&mut self) -> Result<Vec<StreamId>> {
-        self.store.streams().collect()
-    }
-
-    pub fn subscribe(&mut self, id: &StreamId) {
-        //self.streams.insert(*stream.id(), ReplicatedStream::new(stream));
+    pub fn subscribe(&mut self, id: &StreamId) -> Result<()> {
+        let stream = self.store.subscribe(id)?;
+        let stream = SliceBuffer::new(stream, self.slice_len as u64);
+        self.streams.insert(*id, ReplicatedStream::new(stream));
+        Ok(())
     }
 
     pub fn add_peers(&mut self, id: &StreamId, peers: &[PeerId]) {
@@ -197,17 +211,24 @@ impl StreamSync {
         };
         if let Err(err) = head.verify(stream.buffer.id()) {
             tracing::error!("invalid head: {}", err);
-            return
+            return;
         }
         if head.head().len() <= stream.buffer.head().len() {
             return;
         }
         if let Some(chead) = stream.head.as_ref() {
             if head.head().len() <= chead.head().len() {
-                return
+                return;
             }
         }
         stream.head = Some(head);
+        // TODO send requests
+    }
+
+    fn send_slice(&mut self, ch: ChannelId, id: &StreamId, start: u64, len: u64) -> Result<()> {
+        self.store.extract(id, start, len, &mut self.slice)?;
+        self.inner.respond_final(ch, self.slice.clone())?;
+        Ok(())
     }
 }
 
@@ -232,7 +253,12 @@ impl NetworkBehaviour for StreamSync {
         self.inner.inject_disconnected(peer)
     }
 
-    fn inject_connection_closed(&mut self, peer: &PeerId, conn: &ConnectionId, cp: &ConnectedPoint) {
+    fn inject_connection_closed(
+        &mut self,
+        peer: &PeerId,
+        conn: &ConnectionId,
+        cp: &ConnectedPoint,
+    ) {
         self.inner.inject_connection_closed(peer, conn, cp)
     }
 
@@ -267,11 +293,22 @@ impl NetworkBehaviour for StreamSync {
                 NetworkBehaviourAction::DialPeer { peer_id, condition } => {
                     return Poll::Ready(NetworkBehaviourAction::DialPeer { peer_id, condition });
                 }
-                NetworkBehaviourAction::NotifyHandler { peer_id, handler, event } => {
-                    return Poll::Ready(NetworkBehaviourAction::NotifyHandler { peer_id, handler, event });
+                NetworkBehaviourAction::NotifyHandler {
+                    peer_id,
+                    handler,
+                    event,
+                } => {
+                    return Poll::Ready(NetworkBehaviourAction::NotifyHandler {
+                        peer_id,
+                        handler,
+                        event,
+                    });
                 }
                 NetworkBehaviourAction::ReportObservedAddr { address, score } => {
-                    return Poll::Ready(NetworkBehaviourAction::ReportObservedAddr { address, score });
+                    return Poll::Ready(NetworkBehaviourAction::ReportObservedAddr {
+                        address,
+                        score,
+                    });
                 }
             };
             match event {
@@ -279,22 +316,28 @@ impl NetworkBehaviour for StreamSync {
                     channel_id,
                     payload,
                 } => {
+                    if let Err(err) =
+                        self.send_slice(channel_id, &payload.stream, payload.start, payload.len)
+                    {
+                        tracing::info!("error sending slice: {}", err);
+                    }
                 }
                 StreamingResponseEvent::CancelledRequest {
-                    channel_id,
-                    reason,
-                } => {
-                }
+                    channel_id: _,
+                    reason: _,
+                } => {}
                 StreamingResponseEvent::ResponseReceived {
                     request_id,
                     sequence_no,
                     payload,
                 } => {
+                    // TODO
                 }
                 StreamingResponseEvent::ResponseFinished {
-                    request_id,
-                    sequence_no,
+                    request_id: _,
+                    sequence_no: _,
                 } => {
+                    // TODO retry
                 }
             }
         }
