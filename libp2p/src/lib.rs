@@ -60,10 +60,11 @@ use blake_streams::{
     Head, Keypair, SignedHead, Slice, SliceBuffer, StreamId, StreamReader, StreamStorage,
     StreamWriter,
 };
-use fnv::{FnvHashMap, FnvHashSet};
+use fnv::FnvHashMap;
 use libp2p::core::connection::{ConnectedPoint, ConnectionId};
 use libp2p::streaming_response::{
-    ChannelId, Codec, StreamingResponse, StreamingResponseConfig, StreamingResponseEvent,
+    ChannelId, Codec, RequestId, SequenceNo, StreamingResponse, StreamingResponseConfig,
+    StreamingResponseEvent,
 };
 use libp2p::swarm::{
     IntoProtocolsHandler, NetworkBehaviour, NetworkBehaviourAction, PollParameters,
@@ -72,6 +73,7 @@ use libp2p::swarm::{
 use libp2p::{Multiaddr, PeerId};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
+use std::convert::TryInto;
 use std::io::{self, Write};
 use std::path::Path;
 use std::sync::Arc;
@@ -128,16 +130,19 @@ pub enum StreamSyncEvent {
 
 struct ReplicatedStream {
     buffer: SliceBuffer,
-    peers: FnvHashSet<PeerId>,
-    head: Option<SignedHead>,
+    peers: Vec<PeerId>,
+    head: SignedHead,
+    sync: Option<SignedHead>,
 }
 
 impl ReplicatedStream {
     fn new(buffer: SliceBuffer) -> Self {
+        let head = *buffer.head();
         Self {
             buffer,
             peers: Default::default(),
-            head: None,
+            head,
+            sync: None,
         }
     }
 }
@@ -146,9 +151,24 @@ pub struct StreamSync {
     inner: StreamingResponse<StreamSyncCodec>,
     store: StreamStorage,
     streams: FnvHashMap<StreamId, ReplicatedStream>,
+    requests: FnvHashMap<RequestId, RequestState>,
     events: VecDeque<StreamSyncEvent>,
     slice_len: usize,
     slice: Slice,
+}
+
+fn peer_id_xor(id: &PeerId, x: [u8; 32]) -> [u8; 32] {
+    let mut peer_id: [u8; 32] = id.as_ref().digest().try_into().unwrap();
+    for (n, x) in peer_id.iter_mut().zip(x.iter()) {
+        *n ^= x;
+    }
+    peer_id
+}
+
+struct RequestState {
+    stream: StreamId,
+    slice_index: usize,
+    peer_index: usize,
 }
 
 impl StreamSync {
@@ -163,6 +183,7 @@ impl StreamSync {
             events: Default::default(),
             slice,
             slice_len,
+            requests: Default::default(),
         })
     }
 
@@ -195,11 +216,14 @@ impl StreamSync {
         Ok(())
     }
 
-    pub fn add_peers(&mut self, id: &StreamId, peers: &[PeerId]) {
+    pub fn set_peers(&mut self, id: &StreamId, mut peers: Vec<PeerId>) {
+        // creates a deterministic unique order for each peer
+        // by sorting the xored public keys.
+        let key = self.store.public_key().to_bytes();
+        peers.sort_unstable_by(|a, b| peer_id_xor(a, key).cmp(&peer_id_xor(b, key)));
+        peers.dedup();
         if let Some(stream) = self.streams.get_mut(id) {
-            for peer in peers {
-                stream.peers.insert(*peer);
-            }
+            stream.peers = peers;
         }
     }
 
@@ -209,26 +233,90 @@ impl StreamSync {
         } else {
             return;
         };
+        if head.head().len() <= stream.head.head().len() {
+            return;
+        }
         if let Err(err) = head.verify(stream.buffer.id()) {
             tracing::error!("invalid head: {}", err);
             return;
         }
-        if head.head().len() <= stream.buffer.head().len() {
+        stream.head = head;
+        if stream.sync.is_none() {
+            self.start_sync(head);
+        }
+    }
+
+    fn start_sync(&mut self, head: SignedHead) {
+        let stream = if let Some(stream) = self.streams.get_mut(head.head().id()) {
+            stream
+        } else {
             return;
+        };
+        stream.sync = Some(head);
+        stream
+            .buffer
+            .prepare(head.head().len() - stream.buffer.head().head().len());
+        for i in 0..stream.buffer.slices().len() {
+            let request = RequestState {
+                stream: *head.head().id(),
+                slice_index: i,
+                peer_index: 0,
+            };
+            self.request_slice(request);
         }
-        if let Some(chead) = stream.head.as_ref() {
-            if head.head().len() <= chead.head().len() {
-                return;
-            }
-        }
-        stream.head = Some(head);
-        // TODO send requests
+    }
+
+    fn request_slice(&mut self, state: RequestState) {
+        let stream = self.streams.get(&state.stream).unwrap();
+        let peer = stream.peers[(state.slice_index + state.peer_index) % stream.peers.len()];
+        let slice = &stream.buffer.slices()[state.slice_index];
+        let request = StreamSyncRequest {
+            stream: state.stream,
+            start: slice.offset,
+            len: slice.len,
+        };
+        let req = self.inner.request(peer, request);
+        self.requests.insert(req, state);
     }
 
     fn send_slice(&mut self, ch: ChannelId, id: &StreamId, start: u64, len: u64) -> Result<()> {
         self.store.extract(id, start, len, &mut self.slice)?;
         self.inner.respond_final(ch, self.slice.clone())?;
         Ok(())
+    }
+
+    fn recv_slice(&mut self, req: RequestId, _no: SequenceNo, slice: Slice) {
+        let stream = if let Some(stream) = self.streams.get_mut(slice.head.head().id()) {
+            stream
+        } else {
+            return;
+        };
+        let mut req = if let Some(req) = self.requests.remove(&req) {
+            req
+        } else {
+            return;
+        };
+        if let Err(err) = stream.buffer.add_slice(&slice, req.slice_index) {
+            tracing::info!("error adding slice: {}", err);
+            req.peer_index += 1;
+            self.request_slice(req);
+            return;
+        }
+        if stream.buffer.commitable() {
+            let head = stream.sync.take().unwrap();
+            // TODO don't unwrap
+            let head = stream.buffer.commit(*head.sig()).unwrap();
+            self.events.push_back(StreamSyncEvent::NewHead(head));
+            let head = stream.head;
+            self.start_sync(head);
+        }
+    }
+
+    fn finished(&mut self, req: RequestId, _no: SequenceNo) {
+        if let Some(mut req) = self.requests.remove(&req) {
+            req.peer_index += 1;
+            self.request_slice(req);
+        }
     }
 }
 
@@ -331,13 +419,13 @@ impl NetworkBehaviour for StreamSync {
                     sequence_no,
                     payload,
                 } => {
-                    // TODO
+                    self.recv_slice(request_id, sequence_no, payload);
                 }
                 StreamingResponseEvent::ResponseFinished {
-                    request_id: _,
-                    sequence_no: _,
+                    request_id,
+                    sequence_no,
                 } => {
-                    // TODO retry
+                    self.finished(request_id, sequence_no);
                 }
             }
         }

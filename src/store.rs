@@ -2,7 +2,7 @@ use crate::stream::StreamLock;
 use crate::{Head, Slice, Stream, StreamId, StreamReader, StreamWriter};
 use anyhow::Result;
 use bao::encode::SliceExtractor;
-use ed25519_dalek::Keypair;
+use ed25519_dalek::{Keypair, PublicKey};
 use fnv::{FnvHashMap, FnvHashSet};
 use parking_lot::Mutex;
 use rkyv::{Archive, Deserialize, Infallible};
@@ -76,6 +76,10 @@ impl StreamStorage {
             locks: Default::default(),
             paths: Default::default(),
         })
+    }
+
+    pub fn public_key(&self) -> &PublicKey {
+        &self.key.public
     }
 
     fn get_stream(&self, id: &StreamId) -> Result<Option<ZeroCopy<Stream>>> {
