@@ -62,7 +62,7 @@ use blake_streams::{
 };
 use fnv::FnvHashMap;
 use futures::prelude::*;
-use libp2p::core::connection::{ConnectedPoint, ConnectionId};
+use libp2p::core::connection::{ConnectedPoint, ConnectionId, ListenerId};
 use libp2p::request_response::{
     ProtocolName, ProtocolSupport, RequestId, RequestResponse, RequestResponseCodec,
     RequestResponseConfig, RequestResponseEvent, RequestResponseMessage, ResponseChannel,
@@ -78,7 +78,7 @@ use std::io::{self, Write};
 use std::path::Path;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use zerocopy::AsBytes;
+use zerocopy::{AsBytes, FromBytes, LayoutVerified};
 
 pub use blake_streams::Keypair;
 pub type Channel = ResponseChannel<Slice>;
@@ -119,7 +119,9 @@ impl ProtocolName for StreamSyncProtocol {
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct StreamSyncCodec {}
+pub struct StreamSyncCodec {
+    buffer: Vec<u8>,
+}
 
 #[async_trait]
 impl RequestResponseCodec for StreamSyncCodec {
@@ -131,7 +133,19 @@ impl RequestResponseCodec for StreamSyncCodec {
     where
         T: AsyncRead + Send + Unpin,
     {
-        todo!()
+        self.buffer.clear();
+        // unsafe { self.buffer.set_len(std::mem::size_of::<StreamSyncRequest>()); }
+        self.buffer
+            .resize(std::mem::size_of::<StreamSyncRequest>(), 0);
+        io.read_exact(&mut self.buffer).await?;
+        let layout = LayoutVerified::<_, StreamSyncRequest>::new(&self.buffer[..]).unwrap();
+        let req = StreamSyncRequest {
+            stream: layout.stream,
+            start: layout.start,
+            len: layout.len,
+        };
+        tracing::trace!("read_request {:?}", req);
+        Ok(req)
     }
 
     async fn read_response<T>(
@@ -142,7 +156,22 @@ impl RequestResponseCodec for StreamSyncCodec {
     where
         T: AsyncRead + Send + Unpin,
     {
-        todo!()
+        self.buffer.clear();
+        // unsafe { self.buffer.set_len(std::mem::size_of::<SignedHead>()); }
+        self.buffer.resize(std::mem::size_of::<SignedHead>(), 0);
+        io.read_exact(&mut self.buffer).await?;
+        let layout = LayoutVerified::<_, SignedHead>::new(&self.buffer[..]).unwrap();
+        let mut slice = Slice::default();
+        slice.head = SignedHead {
+            head: layout.head,
+            sig: layout.sig,
+        };
+        tracing::trace!("read_response {:?}", slice.head);
+        self.buffer.clear();
+        // TODO: make sure to limit this to a reasonable value
+        io.read_to_end(&mut self.buffer).await?;
+        slice.data = self.buffer.clone();
+        Ok(slice)
     }
 
     async fn write_request<T>(
@@ -154,6 +183,7 @@ impl RequestResponseCodec for StreamSyncCodec {
     where
         T: AsyncWrite + Send + Unpin,
     {
+        tracing::trace!("write_request {:?}", req);
         io.write_all(req.as_bytes()).await?;
         Ok(())
     }
@@ -167,13 +197,14 @@ impl RequestResponseCodec for StreamSyncCodec {
     where
         T: AsyncWrite + Send + Unpin,
     {
-        todo!()
-        //io.write_all(res.as_bytes()).await?;
-        //Ok(())
+        tracing::trace!("write_response {:?}", res.head);
+        io.write_all(res.head.as_bytes()).await?;
+        io.write_all(&res.data).await?;
+        Ok(())
     }
 }
 
-#[derive(AsBytes)]
+#[derive(AsBytes, FromBytes, Debug)]
 #[repr(C)]
 pub struct StreamSyncRequest {
     stream: StreamId,
@@ -333,7 +364,6 @@ impl StreamSync {
     }
 
     fn request_slice(&mut self, state: RequestState) {
-        tracing::info!("requesting slice");
         let stream = self.streams.get(&state.stream).unwrap();
         let peer = stream.peers[(state.slice_index + state.peer_index) % stream.peers.len()];
         let slice = &stream.buffer.slices()[state.slice_index];
@@ -347,14 +377,12 @@ impl StreamSync {
     }
 
     fn send_slice(&mut self, ch: Channel, id: &StreamId, start: u64, len: u64) -> Result<()> {
-        tracing::info!("sending slice");
         self.store.extract(id, start, len, &mut self.slice)?;
         self.inner.send_response(ch, self.slice.clone()).ok();
         Ok(())
     }
 
     fn recv_slice(&mut self, req: RequestId, slice: Slice) {
-        tracing::info!("received slice");
         let stream = if let Some(stream) = self.streams.get_mut(slice.head.head().id()) {
             stream
         } else {
@@ -410,6 +438,15 @@ impl NetworkBehaviour for StreamSync {
         self.inner.inject_disconnected(peer)
     }
 
+    fn inject_connection_established(
+        &mut self,
+        peer: &PeerId,
+        conn: &ConnectionId,
+        cp: &ConnectedPoint,
+    ) {
+        self.inner.inject_connection_established(peer, conn, cp)
+    }
+
     fn inject_connection_closed(
         &mut self,
         peer: &PeerId,
@@ -417,6 +454,43 @@ impl NetworkBehaviour for StreamSync {
         cp: &ConnectedPoint,
     ) {
         self.inner.inject_connection_closed(peer, conn, cp)
+    }
+
+    fn inject_addr_reach_failure(
+        &mut self,
+        peer_id: Option<&PeerId>,
+        addr: &Multiaddr,
+        error: &dyn std::error::Error,
+    ) {
+        self.inner.inject_addr_reach_failure(peer_id, addr, error)
+    }
+
+    fn inject_dial_failure(&mut self, peer_id: &PeerId) {
+        self.inner.inject_dial_failure(peer_id)
+    }
+
+    fn inject_new_listen_addr(&mut self, id: ListenerId, addr: &Multiaddr) {
+        self.inner.inject_new_listen_addr(id, addr)
+    }
+
+    fn inject_expired_listen_addr(&mut self, id: ListenerId, addr: &Multiaddr) {
+        self.inner.inject_expired_listen_addr(id, addr)
+    }
+
+    fn inject_new_external_addr(&mut self, addr: &Multiaddr) {
+        self.inner.inject_new_external_addr(addr)
+    }
+
+    fn inject_expired_external_addr(&mut self, addr: &Multiaddr) {
+        self.inner.inject_expired_external_addr(addr)
+    }
+
+    fn inject_listener_error(&mut self, id: ListenerId, err: &(dyn std::error::Error + 'static)) {
+        self.inner.inject_listener_error(id, err)
+    }
+
+    fn inject_listener_closed(&mut self, id: ListenerId, reason: Result<(), &std::io::Error>) {
+        self.inner.inject_listener_closed(id, reason)
     }
 
     fn inject_event(
@@ -493,7 +567,7 @@ impl NetworkBehaviour for StreamSync {
                     request_id: _,
                 } => {}
                 RequestResponseEvent::OutboundFailure {
-                    peer,
+                    peer: _,
                     request_id,
                     error,
                 } => {

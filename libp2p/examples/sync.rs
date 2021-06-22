@@ -76,7 +76,7 @@ async fn main() -> Result<()> {
     server.listen_on("/memory/1".parse()?)?;
     let mut client = build_swarm(&tmp.path().join("client"), [1; 32], 65536)?;
 
-    let data = rand_bytes(1024 * 1024 * 100);
+    let data = rand_bytes(1024 * 1024 * 1024);
     let mut stream = server.behaviour_mut().append(0)?;
     stream.write_all(&data)?;
     let head = stream.commit()?;

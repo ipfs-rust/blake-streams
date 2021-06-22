@@ -6,9 +6,9 @@ use rkyv::ser::serializers::AlignedSerializer;
 use rkyv::ser::Serializer;
 use rkyv::{AlignedVec, Archive, Deserialize, Serialize};
 use std::sync::Arc;
-use zerocopy::AsBytes;
+use zerocopy::{AsBytes, FromBytes};
 
-#[derive(Archive, Deserialize, Serialize, AsBytes, Clone, Copy, Eq, Hash, PartialEq)]
+#[derive(Archive, Deserialize, Serialize, AsBytes, FromBytes, Clone, Copy, Eq, Hash, PartialEq)]
 #[archive(as = "StreamId")]
 #[repr(C)]
 #[cfg_attr(feature = "serde-derive", derive(serde::Deserialize, serde::Serialize))]
@@ -46,14 +46,16 @@ impl StreamId {
     }
 }
 
-#[derive(Archive, Deserialize, Serialize, AsBytes, Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(
+    Archive, Deserialize, Serialize, AsBytes, FromBytes, Clone, Copy, Debug, Eq, PartialEq,
+)]
 #[archive(as = "Head")]
 #[repr(C)]
 #[cfg_attr(feature = "serde-derive", derive(serde::Deserialize, serde::Serialize))]
 pub struct Head {
-    pub(crate) id: StreamId,
-    pub(crate) hash: [u8; 32],
-    pub(crate) len: u64,
+    pub id: StreamId,
+    pub hash: [u8; 32],
+    pub len: u64,
 }
 
 impl Head {
@@ -83,14 +85,16 @@ impl Head {
     }
 }
 
-#[derive(Archive, Deserialize, Serialize, AsBytes, Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(
+    Archive, Deserialize, Serialize, AsBytes, FromBytes, Clone, Copy, Debug, Eq, PartialEq,
+)]
 #[archive(as = "SignedHead")]
 #[repr(C)]
 #[cfg_attr(feature = "serde-derive", derive(serde::Deserialize, serde::Serialize))]
 pub struct SignedHead {
-    pub(crate) head: Head,
+    pub head: Head,
     #[cfg_attr(feature = "serde-derive", serde(with = "serde_big_array::BigArray"))]
-    sig: [u8; 64],
+    pub sig: [u8; 64],
 }
 
 impl Default for SignedHead {
@@ -186,6 +190,12 @@ impl Slice {
             head: Default::default(),
             data: Vec::with_capacity(capacity),
         }
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut ser = AlignedSerializer::new(AlignedVec::new());
+        ser.serialize_value(self).unwrap();
+        ser.into_inner().into_vec()
     }
 }
 
