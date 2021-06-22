@@ -57,8 +57,7 @@
 //! ```
 use anyhow::Result;
 use blake_streams::{
-    Head, Keypair, SignedHead, Slice, SliceBuffer, StreamId, StreamReader, StreamStorage,
-    StreamWriter,
+    Head, SignedHead, Slice, SliceBuffer, StreamId, StreamReader, StreamStorage, StreamWriter,
 };
 use fnv::FnvHashMap;
 use libp2p::core::connection::{ConnectedPoint, ConnectionId};
@@ -78,6 +77,8 @@ use std::io::{self, Write};
 use std::path::Path;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+
+pub use blake_streams::Keypair;
 
 pub struct LocalStreamWriter {
     inner: StreamWriter<Arc<Keypair>>,
@@ -456,7 +457,7 @@ mod tests {
     use libp2p::yamux::YamuxConfig;
     use rand::RngCore;
     use std::io::Read;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
     use tempdir::TempDir;
 
     fn tracing_try_init() {
@@ -515,9 +516,9 @@ mod tests {
     async fn test_sync() -> Result<()> {
         tracing_try_init();
         let tmp = TempDir::new("libp2p_blake_streams")?;
-        let mut server = build_swarm(&tmp.path().join("server"), [0; 32], 8192)?;
+        let mut server = build_swarm(&tmp.path().join("server"), [0; 32], 65536)?;
         server.listen_on("/memory/1".parse()?)?;
-        let mut client = build_swarm(&tmp.path().join("client"), [1; 32], 8192)?;
+        let mut client = build_swarm(&tmp.path().join("client"), [1; 32], 65536)?;
 
         let data = rand_bytes(1024 * 1024);
         let mut stream = server.behaviour_mut().append(0)?;
@@ -530,6 +531,8 @@ mod tests {
             .set_peers(head.head().id(), vec![*server.local_peer_id()]);
         client.dial_addr("/memory/1".parse().unwrap())?;
 
+        let mut start = None;
+
         loop {
             futures::select! {
                 ev = server.next() => {
@@ -541,6 +544,7 @@ mod tests {
                     match ev {
                         SwarmEvent::ConnectionEstablished { .. } => {
                             client.behaviour_mut().update_head(head);
+                            start = Some(Instant::now());
                         }
                         SwarmEvent::Behaviour(StreamSyncEvent::NewHead(_)) => {
                             break;
@@ -550,6 +554,14 @@ mod tests {
                 }
             }
         }
+
+        let time = start.unwrap().elapsed();
+        println!(
+            "synced {} in {}ms ({:.2} MB/s)",
+            data.len(),
+            time.as_millis(),
+            data.len() as f64 / time.as_micros() as f64
+        );
 
         let mut data2 = vec![];
         let mut stream = client
