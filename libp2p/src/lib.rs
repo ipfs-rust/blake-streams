@@ -56,29 +56,32 @@
 //! # Ok(()) }
 //! ```
 use anyhow::Result;
+use async_trait::async_trait;
 use blake_streams::{
     Head, SignedHead, Slice, SliceBuffer, StreamId, StreamReader, StreamStorage, StreamWriter,
 };
 use fnv::FnvHashMap;
+use futures::prelude::*;
 use libp2p::core::connection::{ConnectedPoint, ConnectionId};
-use libp2p::streaming_response::{
-    ChannelId, Codec, RequestId, SequenceNo, StreamingResponse, StreamingResponseConfig,
-    StreamingResponseEvent,
+use libp2p::request_response::{
+    ProtocolName, ProtocolSupport, RequestId, RequestResponse, RequestResponseCodec,
+    RequestResponseConfig, RequestResponseEvent, RequestResponseMessage, ResponseChannel,
 };
 use libp2p::swarm::{
     IntoProtocolsHandler, NetworkBehaviour, NetworkBehaviourAction, PollParameters,
     ProtocolsHandler,
 };
 use libp2p::{Multiaddr, PeerId};
-use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::convert::TryInto;
 use std::io::{self, Write};
 use std::path::Path;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use zerocopy::AsBytes;
 
 pub use blake_streams::Keypair;
+pub type Channel = ResponseChannel<Slice>;
 
 pub struct LocalStreamWriter {
     inner: StreamWriter<Arc<Keypair>>,
@@ -107,18 +110,71 @@ impl Write for LocalStreamWriter {
 }
 
 #[derive(Clone, Debug)]
-pub struct StreamSyncCodec;
+pub struct StreamSyncProtocol;
 
-impl Codec for StreamSyncCodec {
-    type Request = StreamSyncRequest;
-    type Response = Slice;
-
-    fn protocol_info() -> &'static [u8] {
+impl ProtocolName for StreamSyncProtocol {
+    fn protocol_name(&self) -> &'static [u8] {
         b"/ipfs-embed/stream-sync/1.0.0"
     }
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Debug, Default)]
+pub struct StreamSyncCodec {}
+
+#[async_trait]
+impl RequestResponseCodec for StreamSyncCodec {
+    type Protocol = StreamSyncProtocol;
+    type Request = StreamSyncRequest;
+    type Response = Slice;
+
+    async fn read_request<T>(&mut self, _: &Self::Protocol, io: &mut T) -> io::Result<Self::Request>
+    where
+        T: AsyncRead + Send + Unpin,
+    {
+        todo!()
+    }
+
+    async fn read_response<T>(
+        &mut self,
+        _: &Self::Protocol,
+        io: &mut T,
+    ) -> io::Result<Self::Response>
+    where
+        T: AsyncRead + Send + Unpin,
+    {
+        todo!()
+    }
+
+    async fn write_request<T>(
+        &mut self,
+        _: &Self::Protocol,
+        io: &mut T,
+        req: Self::Request,
+    ) -> io::Result<()>
+    where
+        T: AsyncWrite + Send + Unpin,
+    {
+        io.write_all(req.as_bytes()).await?;
+        Ok(())
+    }
+
+    async fn write_response<T>(
+        &mut self,
+        _: &Self::Protocol,
+        io: &mut T,
+        res: Self::Response,
+    ) -> io::Result<()>
+    where
+        T: AsyncWrite + Send + Unpin,
+    {
+        todo!()
+        //io.write_all(res.as_bytes()).await?;
+        //Ok(())
+    }
+}
+
+#[derive(AsBytes)]
+#[repr(C)]
 pub struct StreamSyncRequest {
     stream: StreamId,
     start: u64,
@@ -150,7 +206,7 @@ impl ReplicatedStream {
 }
 
 pub struct StreamSync {
-    inner: StreamingResponse<StreamSyncCodec>,
+    inner: RequestResponse<StreamSyncCodec>,
     store: StreamStorage,
     streams: FnvHashMap<StreamId, ReplicatedStream>,
     requests: FnvHashMap<RequestId, RequestState>,
@@ -175,7 +231,10 @@ struct RequestState {
 
 impl StreamSync {
     pub fn open(path: &Path, key: Keypair, slice_len: usize) -> Result<Self> {
-        let inner = StreamingResponse::new(StreamingResponseConfig::default());
+        let codec = StreamSyncCodec::default();
+        let protocols = std::iter::once((StreamSyncProtocol, ProtocolSupport::Full));
+        let config = RequestResponseConfig::default();
+        let inner = RequestResponse::new(codec, protocols, config);
         let store = StreamStorage::open(path, key)?;
         let slice = Slice::with_capacity(slice_len);
         Ok(Self {
@@ -283,18 +342,18 @@ impl StreamSync {
             start: slice.offset,
             len: slice.len,
         };
-        let req = self.inner.request(peer, request);
+        let req = self.inner.send_request(&peer, request);
         self.requests.insert(req, state);
     }
 
-    fn send_slice(&mut self, ch: ChannelId, id: &StreamId, start: u64, len: u64) -> Result<()> {
+    fn send_slice(&mut self, ch: Channel, id: &StreamId, start: u64, len: u64) -> Result<()> {
         tracing::info!("sending slice");
         self.store.extract(id, start, len, &mut self.slice)?;
-        self.inner.respond_final(ch, self.slice.clone())?;
+        self.inner.send_response(ch, self.slice.clone()).ok();
         Ok(())
     }
 
-    fn recv_slice(&mut self, req: RequestId, _no: SequenceNo, slice: Slice) {
+    fn recv_slice(&mut self, req: RequestId, slice: Slice) {
         tracing::info!("received slice");
         let stream = if let Some(stream) = self.streams.get_mut(slice.head.head().id()) {
             stream
@@ -322,7 +381,7 @@ impl StreamSync {
         }
     }
 
-    fn finished(&mut self, req: RequestId, _no: SequenceNo) {
+    fn recv_error(&mut self, req: RequestId) {
         if let Some(mut req) = self.requests.remove(&req) {
             req.peer_index += 1;
             self.request_slice(req);
@@ -332,7 +391,7 @@ impl StreamSync {
 
 impl NetworkBehaviour for StreamSync {
     type ProtocolsHandler =
-        <StreamingResponse<StreamSyncCodec> as NetworkBehaviour>::ProtocolsHandler;
+        <RequestResponse<StreamSyncCodec> as NetworkBehaviour>::ProtocolsHandler;
     type OutEvent = StreamSyncEvent;
 
     fn new_handler(&mut self) -> <Self as NetworkBehaviour>::ProtocolsHandler {
@@ -410,32 +469,43 @@ impl NetworkBehaviour for StreamSync {
                 }
             };
             match event {
-                StreamingResponseEvent::ReceivedRequest {
-                    channel_id,
-                    payload,
-                } => {
-                    if let Err(err) =
-                        self.send_slice(channel_id, &payload.stream, payload.start, payload.len)
-                    {
-                        tracing::info!("error sending slice: {}", err);
+                RequestResponseEvent::Message { peer: _, message } => match message {
+                    RequestResponseMessage::Request {
+                        request_id: _,
+                        request,
+                        channel,
+                    } => {
+                        if let Err(err) =
+                            self.send_slice(channel, &request.stream, request.start, request.len)
+                        {
+                            tracing::info!("error sending slice: {}", err);
+                        }
                     }
-                }
-                StreamingResponseEvent::CancelledRequest {
-                    channel_id: _,
-                    reason: _,
+                    RequestResponseMessage::Response {
+                        request_id,
+                        response,
+                    } => {
+                        self.recv_slice(request_id, response);
+                    }
+                },
+                RequestResponseEvent::ResponseSent {
+                    peer: _,
+                    request_id: _,
                 } => {}
-                StreamingResponseEvent::ResponseReceived {
+                RequestResponseEvent::OutboundFailure {
+                    peer,
                     request_id,
-                    sequence_no,
-                    payload,
+                    error,
                 } => {
-                    self.recv_slice(request_id, sequence_no, payload);
+                    tracing::error!("outbound failure: {}", error);
+                    self.recv_error(request_id);
                 }
-                StreamingResponseEvent::ResponseFinished {
-                    request_id,
-                    sequence_no,
+                RequestResponseEvent::InboundFailure {
+                    peer: _,
+                    request_id: _,
+                    error,
                 } => {
-                    self.finished(request_id, sequence_no);
+                    tracing::error!("inbound failure: {}", error);
                 }
             }
         }

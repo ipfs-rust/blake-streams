@@ -6,12 +6,13 @@ edition = "2018"
 
 [dependencies]
 anyhow = "1.0.41"
-blake-streams = { path = "..", features = ["serde-derive"] }
+async-trait = "0.1.50"
+blake-streams = { path = ".." }
 fnv = "1.0.7"
 futures = "0.3.15"
-libp2p = { version = "0.39.0", default-features = false, features = ["streaming-response"], path = "../../rust-libp2p" }
-serde = "1.0.126"
+libp2p = { version = "0.39.0", default-features = false, features = ["request-response"], path = "../../rust-libp2p" }
 tracing = "0.1.26"
+zerocopy = "0.5.0"
 
 [dev-dependencies]
 async-std = { version = "1.9.0", features = ["attributes"] }

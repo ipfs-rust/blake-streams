@@ -5,7 +5,7 @@ use libp2p::core::muxing::StreamMuxerBox;
 use libp2p::core::transport::{Boxed, MemoryTransport, Transport};
 use libp2p::core::upgrade::Version;
 use libp2p::plaintext::PlainText2Config;
-use libp2p::swarm::{Swarm, SwarmEvent};
+use libp2p::swarm::{Swarm, SwarmBuilder, SwarmEvent};
 use libp2p::yamux::YamuxConfig;
 use libp2p::{identity, PeerId};
 use libp2p_blake_streams::{Keypair, StreamSync, StreamSyncEvent};
@@ -60,7 +60,12 @@ fn build_swarm(path: &Path, mut secret: [u8; 32], slice_len: usize) -> Result<Sw
     let key = identity::Keypair::Ed25519(secret.into());
     let peer_id = key.public().into_peer_id();
     let transport = build_dev_transport(key)?;
-    Ok(Swarm::new(transport, behaviour, peer_id))
+    let swarm = SwarmBuilder::new(transport, behaviour, peer_id)
+        .executor(Box::new(move |fut| {
+            async_std::task::spawn(fut);
+        }))
+        .build();
+    Ok(swarm)
 }
 
 #[async_std::main]

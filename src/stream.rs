@@ -172,7 +172,8 @@ impl Stream {
     }
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Archive, Deserialize, Serialize, Clone, Debug, Default, Eq, PartialEq)]
+#[repr(C)]
 #[cfg_attr(feature = "serde-derive", derive(serde::Deserialize, serde::Serialize))]
 pub struct Slice {
     pub head: SignedHead,
