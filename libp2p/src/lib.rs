@@ -57,9 +57,7 @@
 //! ```
 use anyhow::Result;
 use async_trait::async_trait;
-use blake_streams::{
-    Head, SignedHead, Slice, SliceBuffer, StreamId, StreamReader, StreamStorage, StreamWriter,
-};
+use blake_streams::{Slice, SliceBuffer, StreamStorage, StreamWriter};
 use fnv::FnvHashMap;
 use futures::prelude::*;
 use libp2p::core::connection::{ConnectedPoint, ConnectionId, ListenerId};
@@ -75,12 +73,13 @@ use libp2p::{Multiaddr, PeerId};
 use std::collections::VecDeque;
 use std::convert::TryInto;
 use std::io::{self, Write};
-use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Duration;
 use zerocopy::{AsBytes, FromBytes, LayoutVerified};
 
-pub use blake_streams::Keypair;
+pub use blake_streams::{Head, Keypair, SignedHead, StreamId, StreamReader};
 pub type Channel = ResponseChannel<Slice>;
 
 pub struct LocalStreamWriter {
@@ -260,21 +259,44 @@ struct RequestState {
     peer_index: usize,
 }
 
+#[derive(Debug)]
+pub struct StreamSyncConfig {
+    pub path: PathBuf,
+    pub key: Keypair,
+    pub slice_len: usize,
+    pub request_timeout: Duration,
+    pub connection_keep_alive: Duration,
+}
+
+impl StreamSyncConfig {
+    pub fn new(path: PathBuf, key: Keypair) -> Self {
+        Self {
+            path,
+            key,
+            slice_len: 65536,
+            request_timeout: Duration::from_secs(10),
+            connection_keep_alive: Duration::from_secs(10),
+        }
+    }
+}
+
 impl StreamSync {
-    pub fn open(path: &Path, key: Keypair, slice_len: usize) -> Result<Self> {
+    pub fn new(config: StreamSyncConfig) -> Result<Self> {
         let codec = StreamSyncCodec::default();
         let protocols = std::iter::once((StreamSyncProtocol, ProtocolSupport::Full));
-        let config = RequestResponseConfig::default();
-        let inner = RequestResponse::new(codec, protocols, config);
-        let store = StreamStorage::open(path, key)?;
-        let slice = Slice::with_capacity(slice_len);
+        let mut cfg = RequestResponseConfig::default();
+        cfg.set_request_timeout(config.request_timeout);
+        cfg.set_connection_keep_alive(config.connection_keep_alive);
+        let inner = RequestResponse::new(codec, protocols, cfg);
+        let store = StreamStorage::open(&config.path, config.key)?;
+        let slice = Slice::with_capacity(config.slice_len);
         Ok(Self {
             inner,
             store,
             streams: Default::default(),
             events: Default::default(),
             slice,
-            slice_len,
+            slice_len: config.slice_len,
             requests: Default::default(),
         })
     }
@@ -591,7 +613,6 @@ mod tests {
     use super::*;
     use anyhow::Result;
     use blake_streams::{PublicKey, SecretKey};
-    use futures::stream::StreamExt;
     use libp2p::core::muxing::StreamMuxerBox;
     use libp2p::core::transport::{Boxed, MemoryTransport, Transport};
     use libp2p::core::upgrade::Version;
@@ -644,11 +665,13 @@ mod tests {
     }
 
     fn build_swarm(
-        path: &Path,
+        path: PathBuf,
         mut secret: [u8; 32],
         slice_len: usize,
     ) -> Result<Swarm<StreamSync>> {
-        let behaviour = StreamSync::open(path, keypair(secret), slice_len)?;
+        let mut config = StreamSyncConfig::new(path, keypair(secret));
+        config.slice_len = slice_len;
+        let behaviour = StreamSync::new(config)?;
         let secret = identity::ed25519::SecretKey::from_bytes(&mut secret)?;
         let key = identity::Keypair::Ed25519(secret.into());
         let peer_id = key.public().into_peer_id();
@@ -660,9 +683,9 @@ mod tests {
     async fn test_sync() -> Result<()> {
         tracing_try_init();
         let tmp = TempDir::new("libp2p_blake_streams")?;
-        let mut server = build_swarm(&tmp.path().join("server"), [0; 32], 65536)?;
+        let mut server = build_swarm(tmp.path().join("server"), [0; 32], 65536)?;
         server.listen_on("/memory/1".parse()?)?;
-        let mut client = build_swarm(&tmp.path().join("client"), [1; 32], 65536)?;
+        let mut client = build_swarm(tmp.path().join("client"), [1; 32], 65536)?;
 
         let data = rand_bytes(1024 * 1024);
         let mut stream = server.behaviour_mut().append(0)?;
@@ -679,11 +702,10 @@ mod tests {
 
         loop {
             futures::select! {
-                ev = server.next() => {
-                    tracing::info!("server: {:?}", ev.unwrap());
+                ev = server.next_event().fuse() => {
+                    tracing::info!("server: {:?}", ev);
                 }
-                ev = client.next() => {
-                    let ev = ev.unwrap();
+                ev = client.next_event().fuse() => {
                     tracing::info!("client: {:?}", ev);
                     match ev {
                         SwarmEvent::ConnectionEstablished { .. } => {

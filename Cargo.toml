@@ -12,7 +12,7 @@ serde-derive = ["serde", "serde-big-array"]
 
 [dependencies]
 anyhow = "1.0.41"
-bao = "0.10.1"
+bao = { version = "0.10.1", git = "https://github.com/dvc94ch/bao", branch = "append" }
 ed25519-dalek = "1.0.1"
 fnv = "1.0.7"
 parking_lot = "0.11.1"
@@ -33,6 +33,3 @@ debug = true
 [[bench]]
 name = "sync"
 harness = false
-
-[patch.crates-io]
-bao = { path = "../bao" }

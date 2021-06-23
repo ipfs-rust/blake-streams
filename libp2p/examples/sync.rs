@@ -1,6 +1,6 @@
 use anyhow::Result;
 use blake_streams::{PublicKey, SecretKey};
-use futures::stream::StreamExt;
+use futures::prelude::*;
 use libp2p::core::muxing::StreamMuxerBox;
 use libp2p::core::transport::{Boxed, MemoryTransport, Transport};
 use libp2p::core::upgrade::Version;
@@ -8,10 +8,10 @@ use libp2p::plaintext::PlainText2Config;
 use libp2p::swarm::{Swarm, SwarmBuilder, SwarmEvent};
 use libp2p::yamux::YamuxConfig;
 use libp2p::{identity, PeerId};
-use libp2p_blake_streams::{Keypair, StreamSync, StreamSyncEvent};
+use libp2p_blake_streams::{Keypair, StreamSync, StreamSyncConfig, StreamSyncEvent};
 use rand::RngCore;
 use std::io::{self, Read, Write};
-use std::path::Path;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tempdir::TempDir;
 
@@ -54,8 +54,10 @@ fn build_dev_transport(
     Ok(transport)
 }
 
-fn build_swarm(path: &Path, mut secret: [u8; 32], slice_len: usize) -> Result<Swarm<StreamSync>> {
-    let behaviour = StreamSync::open(path, keypair(secret), slice_len)?;
+fn build_swarm(path: PathBuf, mut secret: [u8; 32], slice_len: usize) -> Result<Swarm<StreamSync>> {
+    let mut config = StreamSyncConfig::new(path, keypair(secret));
+    config.slice_len = slice_len;
+    let behaviour = StreamSync::new(config)?;
     let secret = identity::ed25519::SecretKey::from_bytes(&mut secret)?;
     let key = identity::Keypair::Ed25519(secret.into());
     let peer_id = key.public().into_peer_id();
@@ -72,9 +74,9 @@ fn build_swarm(path: &Path, mut secret: [u8; 32], slice_len: usize) -> Result<Sw
 async fn main() -> Result<()> {
     tracing_try_init();
     let tmp = TempDir::new("libp2p_blake_streams")?;
-    let mut server = build_swarm(&tmp.path().join("server"), [0; 32], 65536)?;
+    let mut server = build_swarm(tmp.path().join("server"), [0; 32], 65536)?;
     server.listen_on("/memory/1".parse()?)?;
-    let mut client = build_swarm(&tmp.path().join("client"), [1; 32], 65536)?;
+    let mut client = build_swarm(tmp.path().join("client"), [1; 32], 65536)?;
 
     let data = rand_bytes(1024 * 1024 * 1024);
     let mut stream = server.behaviour_mut().append(0)?;
@@ -91,11 +93,10 @@ async fn main() -> Result<()> {
 
     loop {
         futures::select! {
-            ev = server.next() => {
-                tracing::info!("server: {:?}", ev.unwrap());
+            ev = server.next_event().fuse() => {
+                tracing::info!("server: {:?}", ev);
             }
-            ev = client.next() => {
-                let ev = ev.unwrap();
+            ev = client.next_event().fuse() => {
                 tracing::info!("client: {:?}", ev);
                 match ev {
                     SwarmEvent::ConnectionEstablished { .. } => {
