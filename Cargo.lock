@@ -422,40 +422,20 @@ checksum = "9c59e7af012c713f529e7a3ee57ce9b31ddd858d4b512923602f74608b009631"
 
 [[package]]
 name = "bytecheck"
-version = "0.5.2"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "01faae92f5625dfbca0915bff633cbf49b90504850f2eb11d319486ccd552160"
+checksum = "dc2a8b8b95e92a7c16e8d34e55ee8b5a447f7b7630c5738245c3d011b4ccf91f"
 dependencies = [
- "bytecheck_derive 0.5.2 (registry+https://github.com/rust-lang/crates.io-index)",
- "ptr_meta",
- "simdutf8",
-]
-
-[[package]]
-name = "bytecheck"
-version = "0.5.2"
-source = "git+https://github.com/djkoloski/bytecheck.git#8fd0e5305de03623395520128d253ba1412528d1"
-dependencies = [
- "bytecheck_derive 0.5.2 (git+https://github.com/djkoloski/bytecheck.git)",
+ "bytecheck_derive",
  "ptr_meta",
  "simdutf8",
 ]
 
 [[package]]
 name = "bytecheck_derive"
-version = "0.5.2"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0881f8a3cade6a2f417972d6a15ea72e9d49a03391d598ffb121c9b2399f2b3f"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
-]
-
-[[package]]
-name = "bytecheck_derive"
-version = "0.5.2"
-source = "git+https://github.com/djkoloski/bytecheck.git#8fd0e5305de03623395520128d253ba1412528d1"
+checksum = "17a3170111467158f1af70dc016e29baf5171d97ab7e4e0972d58915fe61b2fc"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -587,9 +567,9 @@ checksum = "245097e9a4535ee1e3e3931fcfcd55a796a44c643e8596ff6566d68f09b87bbc"
 
 [[package]]
 name = "cpufeatures"
-version = "0.1.4"
+version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ed00c67cb5d0a7d64a44f6ad2668db7e7530311dd53ea79bcd4fb022c64911c8"
+checksum = "66c99696f6c9dd7f35d486b9d04d7e6e202aa3e8c40d553f2fdf5e7e0c6a71ef"
 dependencies = [
  "libc",
 ]
@@ -2576,11 +2556,11 @@ dependencies = [
 
 [[package]]
 name = "rend"
-version = "0.2.3"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "52785708f0186b0c827c291cfdaf35cc96c6b48d2f00cb7e1e5eaf8fdd7131de"
+checksum = "3477931830e82fd1fa439c89e43b11c2ebd38d9644d5883e353fb5bd2fcc99d9"
 dependencies = [
- "bytecheck 0.5.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "bytecheck",
 ]
 
 [[package]]
@@ -2610,10 +2590,10 @@ dependencies = [
 
 [[package]]
 name = "rkyv"
-version = "0.6.7"
-source = "git+https://github.com/djkoloski/rkyv?branch=0.7.0#bf3b63ff1fb52f180f070cdc67cfae270a6f39e5"
+version = "0.7.0-pre.1"
+source = "git+https://github.com/djkoloski/rkyv?branch=0.7.0#3d918be449d007d71db3db1c6df6fd8668ed0daf"
 dependencies = [
- "bytecheck 0.5.2 (git+https://github.com/djkoloski/bytecheck.git)",
+ "bytecheck",
  "hashbrown 0.11.2",
  "ptr_meta",
  "rend",
@@ -2623,8 +2603,8 @@ dependencies = [
 
 [[package]]
 name = "rkyv_derive"
-version = "0.6.7"
-source = "git+https://github.com/djkoloski/rkyv?branch=0.7.0#bf3b63ff1fb52f180f070cdc67cfae270a6f39e5"
+version = "0.7.0-pre.1"
+source = "git+https://github.com/djkoloski/rkyv?branch=0.7.0#3d918be449d007d71db3db1c6df6fd8668ed0daf"
 dependencies = [
  "proc-macro2",
  "quote",
