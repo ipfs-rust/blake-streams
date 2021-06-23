@@ -57,7 +57,7 @@
 //! ```
 use anyhow::Result;
 use async_trait::async_trait;
-use blake_streams::{Slice, SliceBuffer, StreamStorage, StreamWriter};
+use blake_streams_core::{Slice, SliceBuffer, StreamStorage, StreamWriter};
 use fnv::FnvHashMap;
 use futures::prelude::*;
 use libp2p::core::connection::{ConnectedPoint, ConnectionId, ListenerId};
@@ -79,7 +79,9 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 use zerocopy::{AsBytes, FromBytes, LayoutVerified};
 
-pub use blake_streams::{Head, Keypair, SignedHead, StreamId, StreamReader};
+pub use blake_streams_core::{
+    Head, Keypair, PublicKey, SecretKey, SignedHead, StreamId, StreamReader,
+};
 pub type Channel = ResponseChannel<Slice>;
 
 pub struct LocalStreamWriter {
@@ -612,7 +614,6 @@ impl NetworkBehaviour for StreamSync {
 mod tests {
     use super::*;
     use anyhow::Result;
-    use blake_streams::{PublicKey, SecretKey};
     use libp2p::core::muxing::StreamMuxerBox;
     use libp2p::core::transport::{Boxed, MemoryTransport, Transport};
     use libp2p::core::upgrade::Version;

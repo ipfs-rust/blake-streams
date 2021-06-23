@@ -1,5 +1,5 @@
 use anyhow::Result;
-use blake_streams::{Slice, SliceBuffer, StreamStorage};
+use blake_streams_core::{Slice, SliceBuffer, StreamStorage};
 use ed25519_dalek::{Keypair, PublicKey, SecretKey};
 use rand::RngCore;
 use std::io::Write;

@@ -1,5 +1,4 @@
 use anyhow::Result;
-use blake_streams::{PublicKey, SecretKey};
 use futures::prelude::*;
 use libp2p::core::muxing::StreamMuxerBox;
 use libp2p::core::transport::{Boxed, MemoryTransport, Transport};
@@ -8,7 +7,9 @@ use libp2p::plaintext::PlainText2Config;
 use libp2p::swarm::{Swarm, SwarmBuilder, SwarmEvent};
 use libp2p::yamux::YamuxConfig;
 use libp2p::{identity, PeerId};
-use libp2p_blake_streams::{Keypair, StreamSync, StreamSyncConfig, StreamSyncEvent};
+use libp2p_blake_streams::{
+    Keypair, PublicKey, SecretKey, StreamSync, StreamSyncConfig, StreamSyncEvent,
+};
 use rand::RngCore;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;

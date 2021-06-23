@@ -1,5 +1,5 @@
 use anyhow::Result;
-use blake_streams::{Slice, SliceBuffer, StreamStorage};
+use blake_streams_core::{Slice, SliceBuffer, StreamStorage};
 use criterion::measurement::WallTime;
 use criterion::{criterion_group, criterion_main, Bencher, BenchmarkId, Criterion, Throughput};
 use ed25519_dalek::{Keypair, PublicKey, SecretKey};

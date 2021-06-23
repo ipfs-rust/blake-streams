@@ -7,7 +7,7 @@ edition = "2018"
 [dependencies]
 anyhow = "1.0.41"
 async-trait = "0.1.50"
-blake-streams = { path = ".." }
+blake-streams-core = { path = "../core" }
 fnv = "1.0.7"
 futures = "0.3.15"
 libp2p = { default-features = false, features = ["request-response"], git = "https://github.com/dvc94ch/rust-libp2p", branch = "sim-open" }
