@@ -429,7 +429,9 @@ impl StreamSync {
             let head = stream.buffer.commit(*head.sig()).unwrap();
             self.events.push_back(StreamSyncEvent::NewHead(head));
             let head = stream.head;
-            self.start_sync(head);
+            if head.head().len() > stream.buffer.head().head().len() {
+                self.start_sync(head);
+            }
         }
     }
 
