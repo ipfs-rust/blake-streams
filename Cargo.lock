@@ -365,7 +365,7 @@ dependencies = [
 [[package]]
 name = "blake-streams-core"
 version = "0.1.0"
-source = "git+https://github.com/dvc94ch/blake-streams#9fe48ca02c3c8bd68cb1e0d96e386823251d4b9d"
+source = "git+https://github.com/dvc94ch/blake-streams#30c0f77cdbf6e522cb29f21b32094526efa3ae6b"
 dependencies = [
  "anyhow",
  "bao",
@@ -1219,9 +1219,9 @@ dependencies = [
 
 [[package]]
 name = "hermit-abi"
-version = "0.1.18"
+version = "0.1.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "322f4de77956e22ed0e5032c359a0f1273f1f7f0d79bfa3b8ffbc730d7fbcc5c"
+checksum = "62b467343b94ba476dcb2500d242dadbb39557df889310ac77c5d99100aaac33"
 dependencies = [
  "libc",
 ]
@@ -1544,7 +1544,7 @@ dependencies = [
 [[package]]
 name = "libp2p-bitswap"
 version = "0.18.0"
-source = "git+https://github.com/ipfs-rust/libp2p-bitswap?branch=sim-open#e469fb3a7eab23c746fd0f050a64f7a5d2ea895a"
+source = "git+https://github.com/ipfs-rust/libp2p-bitswap?branch=sim-open#4718d080c4f522fbbf675b3d46adfe90bdfb2e2d"
 dependencies = [
  "async-trait",
  "fnv",
@@ -1579,7 +1579,7 @@ dependencies = [
 [[package]]
 name = "libp2p-blake-streams"
 version = "0.1.0"
-source = "git+https://github.com/dvc94ch/blake-streams#9fe48ca02c3c8bd68cb1e0d96e386823251d4b9d"
+source = "git+https://github.com/dvc94ch/blake-streams#30c0f77cdbf6e522cb29f21b32094526efa3ae6b"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1594,7 +1594,7 @@ dependencies = [
 [[package]]
 name = "libp2p-broadcast"
 version = "0.4.0"
-source = "git+https://github.com/ipfs-rust/libp2p-broadcast?branch=sim-open#1cf7e49dc0cbb55b90696e2af0f4eea81bfda256"
+source = "git+https://github.com/ipfs-rust/libp2p-broadcast?branch=sim-open#3bef32a7f0e680c2c273bb713ae1d63bdf692a9f"
 dependencies = [
  "fnv",
  "futures",
