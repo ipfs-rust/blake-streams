@@ -68,7 +68,7 @@ impl StreamStorage {
     pub fn open(dir: &Path, key: Keypair) -> Result<Self> {
         let db = sled::open(dir.join("db"))?;
         let dir = dir.join("streams");
-        std::fs::create_dir(&dir)?;
+        std::fs::create_dir_all(&dir)?;
         Ok(Self {
             db,
             dir,

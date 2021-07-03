@@ -26,7 +26,12 @@ impl<T> StreamWriter<T> {
         db: sled::Db,
         key: T,
     ) -> Result<Self> {
-        let mut file = OpenOptions::new().write(true).create(true).open(path)?;
+        tracing::debug!("opening stream {} {}", path.display(), stream.head.head.len);
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(path)?;
         let outboard = Vec::with_capacity(stream.outboard.len() * 2);
         let mut encoder = Encoder::new_outboard(Cursor::new(outboard));
         // TODO: this can probably be optimized: discuss with bao author.

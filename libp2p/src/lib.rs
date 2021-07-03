@@ -357,7 +357,7 @@ impl StreamSync {
             return;
         }
         stream.head = head;
-        if stream.sync.is_none() {
+        if stream.sync.is_none() && !stream.peers.is_empty() {
             self.start_sync(head);
         }
     }

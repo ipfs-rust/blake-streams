@@ -1,13 +1,14 @@
 use anyhow::Result;
+use futures::channel::oneshot;
 use futures::prelude::*;
-use ipfs_embed::{
-    Event, Key, LocalStreamWriter, Quorum, Record, SignedHead,
-};
+use ipfs_embed::{Event, Key, LocalStreamWriter, Quorum, Record, SignedHead};
 use std::io::{self, Write};
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use zerocopy::{AsBytes, LayoutVerified};
 
 pub type Ipfs = ipfs_embed::Ipfs<ipfs_embed::DefaultParams>;
-pub use ipfs_embed::{self, Head, StreamId, StreamReader};
+pub use ipfs_embed::{self, Head, StreamId, StreamReader, SwarmEvents};
 
 pub struct BlakeStreams {
     ipfs: Ipfs,
@@ -47,7 +48,7 @@ impl BlakeStreams {
         })
     }
 
-    pub async fn subscribe(&self, id: &StreamId) -> Result<impl Stream<Item = Head>> {
+    pub async fn subscribe(&self, id: &StreamId) -> Result<BlakeStream> {
         let dht_key = id.key();
         let events = self.ipfs.swarm_events();
         self.ipfs.stream_subscribe(id)?;
@@ -56,7 +57,12 @@ impl BlakeStreams {
         tracing::info!("found {} peers", peers.len());
         self.ipfs.stream_set_peers(id, peers.into_iter().collect());
         let mut stream = self.ipfs.subscribe(&id.topic())?;
-        let records = self.ipfs.get_record(&dht_key, Quorum::One).await?;
+        let records = self
+            .ipfs
+            .get_record(&dht_key, Quorum::One)
+            .await
+            .ok()
+            .unwrap_or_default();
         for record in records {
             if let Some(head) = LayoutVerified::<_, SignedHead>::new(&record.record.value[..]) {
                 tracing::info!("new head from dht {}", head.head().len());
@@ -64,28 +70,61 @@ impl BlakeStreams {
             }
         }
         let ipfs = self.ipfs.clone();
+        self.ipfs.provide(dht_key).await?;
+        let (exit_tx, mut exit_rx) = oneshot::channel();
         async_global_executor::spawn(async move {
-            while let Some(head) = stream.next().await {
-                match LayoutVerified::<_, SignedHead>::new(&head[..]) {
-                    Some(head) => {
-                        tracing::info!("new head from gossip {}", head.head().len());
-                        ipfs.stream_update_head(*head);
+            let exit = &mut exit_rx;
+            loop {
+                futures::select! {
+                    _ = exit.fuse() => break,
+                    head = stream.next().fuse() => {
+                        if let Some(head) = head {
+                            match LayoutVerified::<_, SignedHead>::new(&head[..]) {
+                                Some(head) => {
+                                    tracing::info!("new head from gossip {}", head.head().len());
+                                    ipfs.stream_update_head(*head);
+                                }
+                                None => tracing::debug!("failed to decode head"),
+                            }
+                        }
                     }
-                    None => tracing::debug!("failed to decode head"),
                 }
             }
         })
         .detach();
-        self.ipfs.provide(dht_key).await?;
-        Ok(events.filter_map(|ev| {
-            let res = if let Event::NewHead(head) = ev {
-                tracing::info!("sync complete {}", head.len());
-                Some(head)
-            } else {
-                None
+        Ok(BlakeStream {
+            events,
+            exit: Some(exit_tx),
+        })
+    }
+}
+
+pub struct BlakeStream {
+    events: SwarmEvents,
+    exit: Option<oneshot::Sender<()>>,
+}
+
+impl Stream for BlakeStream {
+    type Item = Head;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+        loop {
+            return match Pin::new(&mut self.events).poll_next(cx) {
+                Poll::Ready(Some(Event::NewHead(head))) => {
+                    tracing::info!("sync complete {}", head.len());
+                    Poll::Ready(Some(head))
+                }
+                Poll::Ready(None) => Poll::Ready(None),
+                Poll::Pending => Poll::Pending,
+                _ => continue,
             };
-            future::ready(res)
-        }))
+        }
+    }
+}
+
+impl Drop for BlakeStream {
+    fn drop(&mut self) {
+        self.exit.take().unwrap().send(()).ok();
     }
 }
 

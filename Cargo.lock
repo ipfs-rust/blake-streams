@@ -348,6 +348,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bao",
+ "base64 0.13.0",
  "criterion",
  "ed25519-dalek",
  "fnv",
@@ -358,6 +359,7 @@ dependencies = [
  "serde-big-array",
  "sled",
  "tempdir",
+ "tracing",
  "zerocopy",
 ]
 

@@ -19,10 +19,8 @@ pub struct StreamId {
 
 impl std::fmt::Debug for StreamId {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        for byte in self.peer.iter() {
-            write!(f, "{:02x}", byte)?;
-        }
-        write!(f, ".{}", self.stream)
+        let peer = base64::encode_config(&self.peer, base64::URL_SAFE_NO_PAD);
+        write!(f, "{}.{}", peer, self.stream)
     }
 }
 
