@@ -1,12 +1,13 @@
 use anyhow::Result;
 use futures::prelude::*;
 use ipfs_embed::{
-    Event, Head, Key, LocalStreamWriter, Quorum, Record, SignedHead, StreamId, StreamReader,
+    Event, Key, LocalStreamWriter, Quorum, Record, SignedHead,
 };
 use std::io::{self, Write};
 use zerocopy::{AsBytes, LayoutVerified};
 
 pub type Ipfs = ipfs_embed::Ipfs<ipfs_embed::DefaultParams>;
+pub use ipfs_embed::{self, Head, StreamId, StreamReader};
 
 pub struct BlakeStreams {
     ipfs: Ipfs,
@@ -52,12 +53,13 @@ impl BlakeStreams {
         self.ipfs.stream_subscribe(id)?;
         let peers = self.ipfs.providers(dht_key.clone()).await?;
         // TODO: also add peers that subscribe to id via gossip
+        tracing::info!("found {} peers", peers.len());
         self.ipfs.stream_set_peers(id, peers.into_iter().collect());
         let mut stream = self.ipfs.subscribe(&id.topic())?;
         let records = self.ipfs.get_record(&dht_key, Quorum::One).await?;
         for record in records {
             if let Some(head) = LayoutVerified::<_, SignedHead>::new(&record.record.value[..]) {
-                tracing::info!("new head from dht");
+                tracing::info!("new head from dht {}", head.head().len());
                 self.ipfs.stream_update_head(*head);
             }
         }
@@ -66,7 +68,7 @@ impl BlakeStreams {
             while let Some(head) = stream.next().await {
                 match LayoutVerified::<_, SignedHead>::new(&head[..]) {
                     Some(head) => {
-                        tracing::info!("new head from gossip");
+                        tracing::info!("new head from gossip {}", head.head().len());
                         ipfs.stream_update_head(*head);
                     }
                     None => tracing::debug!("failed to decode head"),
@@ -77,6 +79,7 @@ impl BlakeStreams {
         self.ipfs.provide(dht_key).await?;
         Ok(events.filter_map(|ev| {
             let res = if let Event::NewHead(head) = ev {
+                tracing::info!("sync complete {}", head.len());
                 Some(head)
             } else {
                 None
@@ -117,6 +120,7 @@ impl StreamWriter {
 
     pub async fn commit(&mut self) -> Result<()> {
         let head = self.inner.commit()?;
+        tracing::info!("publishing head {}", head.head().len());
         self.ipfs
             .publish(&self.id().topic(), head.as_bytes().to_vec())?;
         let record = Record::new(self.id().key(), head.as_bytes().to_vec());
