@@ -2,7 +2,7 @@ use anyhow::Result;
 use ed25519_dalek::{Keypair, PublicKey, Signature, Signer};
 use fnv::FnvHashSet;
 use parking_lot::Mutex;
-use rkyv::ser::serializers::AlignedSerializer;
+use rkyv::ser::serializers::AllocSerializer;
 use rkyv::ser::Serializer;
 use rkyv::{AlignedVec, Archive, Deserialize, Serialize};
 use std::sync::Arc;
@@ -34,7 +34,9 @@ impl std::str::FromStr for StreamId {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let (peer, stream)  = s.split_once('.').ok_or(anyhow::anyhow!("invalid stream id"))?;
+        let (peer, stream) = s
+            .split_once('.')
+            .ok_or(anyhow::anyhow!("invalid stream id"))?;
         let mut bytes = base64::decode_config(peer, base64::URL_SAFE_NO_PAD)?;
         bytes.resize(32, 0);
         let mut peer = [0; 32];
@@ -182,9 +184,9 @@ impl Stream {
     }
 
     pub(crate) fn to_bytes(&self) -> Result<AlignedVec> {
-        let mut ser = AlignedSerializer::new(AlignedVec::new());
-        ser.serialize_value(self)?;
-        Ok(ser.into_inner())
+        let mut ser = AllocSerializer::<4096>::default();
+        ser.serialize_value(self).unwrap();
+        Ok(ser.into_serializer().into_inner())
     }
 }
 
@@ -205,9 +207,9 @@ impl Slice {
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut ser = AlignedSerializer::new(AlignedVec::new());
+        let mut ser = AllocSerializer::<4096>::default();
         ser.serialize_value(self).unwrap();
-        ser.into_inner().into_vec()
+        ser.into_serializer().into_inner().into_vec()
     }
 }
 

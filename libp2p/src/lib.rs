@@ -341,7 +341,9 @@ impl StreamSync {
         let key = self.store.public_key().to_bytes();
         if let Some(stream) = self.streams.get_mut(id) {
             stream.peers.extend(peers);
-            stream.peers.sort_unstable_by(|a, b| peer_id_xor(a, key).cmp(&peer_id_xor(b, key)));
+            stream
+                .peers
+                .sort_unstable_by(|a, b| peer_id_xor(a, key).cmp(&peer_id_xor(b, key)));
             stream.peers.dedup();
             tracing::info!("{} has {} peers", id, stream.peers.len());
         } else {
@@ -579,6 +581,15 @@ impl NetworkBehaviour for StreamSync {
                     return Poll::Ready(NetworkBehaviourAction::ReportObservedAddr {
                         address,
                         score,
+                    });
+                }
+                NetworkBehaviourAction::CloseConnection {
+                    connection,
+                    peer_id,
+                } => {
+                    return Poll::Ready(NetworkBehaviourAction::CloseConnection {
+                        connection,
+                        peer_id,
                     });
                 }
             };

@@ -14,7 +14,7 @@ base64 = "0.13.0"
 ed25519-dalek = "1.0.1"
 fnv = "1.0.7"
 parking_lot = "0.11.1"
-rkyv = { git = "https://github.com/djkoloski/rkyv", branch = "0.7.0" }
+rkyv = "0.7.0"
 serde = { version = "1.0.126", features = ["derive"], optional = true }
 serde-big-array = { version = "0.3.2", features = ["const-generics"], optional = true }
 sled = "0.34.6"
