@@ -30,6 +30,20 @@ impl std::fmt::Display for StreamId {
     }
 }
 
+impl std::str::FromStr for StreamId {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let (peer, stream)  = s.split_once('.').ok_or(anyhow::anyhow!("invalid stream id"))?;
+        let mut bytes = base64::decode_config(peer, base64::URL_SAFE_NO_PAD)?;
+        bytes.resize(32, 0);
+        let mut peer = [0; 32];
+        peer.copy_from_slice(&bytes);
+        let stream = stream.parse()?;
+        Ok(Self { peer, stream })
+    }
+}
+
 impl StreamId {
     pub fn new(peer: [u8; 32], stream: u64) -> Self {
         Self { peer, stream }

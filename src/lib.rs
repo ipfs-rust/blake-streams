@@ -42,6 +42,8 @@ impl BlakeStreams {
     pub async fn append(&self, id: u64) -> Result<StreamWriter> {
         let writer = self.ipfs.stream_append(id)?;
         self.ipfs.provide(writer.head().id().key()).await?;
+        // this unsubscribes immediately but the other peer gets a subscription event.
+        let _ = self.ipfs.subscribe(&writer.head().id().topic())?;
         Ok(StreamWriter {
             inner: writer,
             ipfs: self.ipfs.clone(),
@@ -49,13 +51,13 @@ impl BlakeStreams {
     }
 
     pub async fn subscribe(&self, id: &StreamId) -> Result<BlakeStream> {
+        tracing::info!("subscribing to {}", id);
         let dht_key = id.key();
         let events = self.ipfs.swarm_events();
         self.ipfs.stream_subscribe(id)?;
         let peers = self.ipfs.providers(dht_key.clone()).await?;
-        // TODO: also add peers that subscribe to id via gossip
         tracing::info!("found {} peers", peers.len());
-        self.ipfs.stream_set_peers(id, peers.into_iter().collect());
+        self.ipfs.stream_add_peers(id, peers.into_iter());
         let mut stream = self.ipfs.subscribe(&id.topic())?;
         let records = self
             .ipfs
@@ -74,6 +76,7 @@ impl BlakeStreams {
         let (exit_tx, mut exit_rx) = oneshot::channel();
         async_global_executor::spawn(async move {
             let exit = &mut exit_rx;
+            let mut events = ipfs.swarm_events();
             loop {
                 futures::select! {
                     _ = exit.fuse() => break,
@@ -85,6 +88,14 @@ impl BlakeStreams {
                                     ipfs.stream_update_head(*head);
                                 }
                                 None => tracing::debug!("failed to decode head"),
+                            }
+                        }
+                    }
+                    event = events.next().fuse() => {
+                        if let Some(Event::Subscribed(peer_id, topic)) = event {
+                            if let Ok(id) = topic.parse() {
+                                tracing::info!("adding peer {}", peer_id);
+                                ipfs.stream_add_peers(&id, std::iter::once(peer_id));
                             }
                         }
                     }

@@ -248,7 +248,10 @@ pub struct StreamSync {
 }
 
 fn peer_id_xor(id: &PeerId, x: [u8; 32]) -> [u8; 32] {
-    let mut peer_id: [u8; 32] = id.as_ref().digest().try_into().unwrap();
+    let mh: &libp2p::multihash::Multihash = id.as_ref();
+    let bytes = &mh.digest()[4..];
+    assert_eq!(bytes.len(), 32);
+    let mut peer_id: [u8; 32] = bytes.try_into().unwrap();
     for (n, x) in peer_id.iter_mut().zip(x.iter()) {
         *n ^= x;
     }
@@ -332,14 +335,23 @@ impl StreamSync {
         Ok(())
     }
 
-    pub fn set_peers(&mut self, id: &StreamId, mut peers: Vec<PeerId>) {
+    pub fn add_peers(&mut self, id: &StreamId, peers: impl Iterator<Item = PeerId>) {
         // creates a deterministic unique order for each peer
         // by sorting the xored public keys.
         let key = self.store.public_key().to_bytes();
-        peers.sort_unstable_by(|a, b| peer_id_xor(a, key).cmp(&peer_id_xor(b, key)));
-        peers.dedup();
         if let Some(stream) = self.streams.get_mut(id) {
-            stream.peers = peers;
+            stream.peers.extend(peers);
+            stream.peers.sort_unstable_by(|a, b| peer_id_xor(a, key).cmp(&peer_id_xor(b, key)));
+            stream.peers.dedup();
+            tracing::info!("{} has {} peers", id, stream.peers.len());
+        } else {
+            tracing::info!("add_peers: missing stream {}", id);
+        }
+    }
+
+    pub fn remove_peer(&mut self, id: &StreamId, peer: &PeerId) {
+        if let Some(stream) = self.streams.get_mut(id) {
+            stream.peers.retain(|p| p != peer);
         }
     }
 
@@ -347,9 +359,11 @@ impl StreamSync {
         let stream = if let Some(stream) = self.streams.get_mut(head.head().id()) {
             stream
         } else {
+            tracing::error!("no stream");
             return;
         };
         if head.head().len() <= stream.head.head().len() {
+            tracing::info!("duplicate head");
             return;
         }
         if let Err(err) = head.verify(stream.buffer.id()) {
