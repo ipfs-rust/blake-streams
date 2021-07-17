@@ -87,24 +87,24 @@ async fn main() -> Result<()> {
     client.behaviour_mut().subscribe(head.head().id())?;
     client
         .behaviour_mut()
-        .set_peers(head.head().id(), vec![*server.local_peer_id()]);
+        .add_peers(head.head().id(), std::iter::once(*server.local_peer_id()));
     client.dial_addr("/memory/1".parse().unwrap())?;
 
     let mut start = None;
 
     loop {
         futures::select! {
-            ev = server.next_event().fuse() => {
+            ev = server.next().fuse() => {
                 tracing::info!("server: {:?}", ev);
             }
-            ev = client.next_event().fuse() => {
+            ev = client.next().fuse() => {
                 tracing::info!("client: {:?}", ev);
                 match ev {
-                    SwarmEvent::ConnectionEstablished { .. } => {
+                    Some(SwarmEvent::ConnectionEstablished { .. }) => {
                         client.behaviour_mut().update_head(head);
                         start = Some(Instant::now());
                     }
-                    SwarmEvent::Behaviour(StreamSyncEvent::NewHead(_)) => {
+                    Some(SwarmEvent::Behaviour(StreamSyncEvent::NewHead(_))) => {
                         break;
                     }
                     _ => {}

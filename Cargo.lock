@@ -297,7 +297,7 @@ checksum = "cdb031dd78e28731d87d56cc8ffef4a8f36ca26c38fe2de700543e627f8a464a"
 [[package]]
 name = "bao"
 version = "0.10.1"
-source = "git+https://github.com/dvc94ch/bao?branch=append#f2dc0f5783483601d2a6652cfe64f2177dab5fd0"
+source = "git+https://github.com/oconnor663/bao?branch=master#1a432c76671931b3d1e63bc7654e0222ac807e48"
 dependencies = [
  "arrayref",
  "arrayvec",

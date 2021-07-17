@@ -64,7 +64,9 @@ impl<T> StreamWriter<T> {
 
     fn finalize(&mut self) -> io::Result<()> {
         self.flush()?;
-        let (hash, outboard) = self.encoder.clone().finalize()?;
+        let mut encoder = self.encoder.clone();
+        let hash = encoder.finalize()?;
+        let outboard = encoder.into_inner();
         self.stream.head.head.hash = hash.into();
         self.stream.outboard = outboard.into_inner();
         Ok(())

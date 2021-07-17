@@ -9,7 +9,7 @@ serde-derive = ["serde", "serde-big-array"]
 
 [dependencies]
 anyhow = "1.0.41"
-bao = { version = "0.10.1", git = "https://github.com/dvc94ch/bao", branch = "append" }
+bao = { version = "0.10.1", git = "https://github.com/oconnor663/bao", branch = "master" }
 base64 = "0.13.0"
 ed25519-dalek = "1.0.1"
 fnv = "1.0.7"
