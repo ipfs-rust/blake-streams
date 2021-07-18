@@ -8,7 +8,7 @@ use libp2p::swarm::{Swarm, SwarmBuilder, SwarmEvent};
 use libp2p::yamux::YamuxConfig;
 use libp2p::{identity, PeerId};
 use libp2p_blake_streams::{
-    Keypair, PublicKey, SecretKey, StreamSync, StreamSyncConfig, StreamSyncEvent,
+    DocId, Keypair, PublicKey, SecretKey, StreamSync, StreamSyncConfig, StreamSyncEvent,
 };
 use rand::RngCore;
 use std::io::{self, Read, Write};
@@ -80,14 +80,14 @@ async fn main() -> Result<()> {
     let mut client = build_swarm(tmp.path().join("client"), [1; 32], 65536)?;
 
     let data = rand_bytes(1024 * 1024 * 1024);
-    let mut stream = server.behaviour_mut().append(0)?;
+    let mut stream = server.behaviour_mut().append(DocId::unique())?;
     stream.write_all(&data)?;
     let head = stream.commit()?;
 
     client.behaviour_mut().subscribe(head.head().id())?;
     client
         .behaviour_mut()
-        .add_peers(head.head().id(), std::iter::once(*server.local_peer_id()));
+        .add_peers(head.head().id().doc(), std::iter::once(*server.local_peer_id()));
     client.dial_addr("/memory/1".parse().unwrap())?;
 
     let mut start = None;

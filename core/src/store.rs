@@ -1,5 +1,5 @@
 use crate::stream::StreamLock;
-use crate::{Head, Slice, Stream, StreamId, StreamReader, StreamWriter};
+use crate::{DocId, Head, PeerId, Slice, Stream, StreamId, StreamReader, StreamWriter};
 use anyhow::Result;
 use bao::encode::SliceExtractor;
 use ed25519_dalek::{Keypair, PublicKey};
@@ -58,6 +58,8 @@ impl<T> From<&ZeroCopy<T>> for sled::IVec {
 
 pub struct StreamStorage {
     db: sled::Db,
+    docs: sled::Tree,
+    streams: sled::Tree,
     dir: PathBuf,
     key: Arc<Keypair>,
     locks: Arc<Mutex<FnvHashSet<StreamId>>>,
@@ -67,10 +69,14 @@ pub struct StreamStorage {
 impl StreamStorage {
     pub fn open(dir: &Path, key: Keypair) -> Result<Self> {
         let db = sled::open(dir.join("db"))?;
+        let docs = db.open_tree("docs")?;
+        let streams = db.open_tree("streams")?;
         let dir = dir.join("streams");
         std::fs::create_dir_all(&dir)?;
         Ok(Self {
             db,
+            docs,
+            streams,
             dir,
             key: Arc::new(key),
             locks: Default::default(),
@@ -90,6 +96,21 @@ impl StreamStorage {
         }
     }
 
+    fn get_or_create_stream(&mut self, id: &StreamId) -> Result<(Stream, StreamLock)> {
+        if !self.contains_stream(&id)? {
+            let path = self.stream_path(&id);
+            std::fs::create_dir_all(path.parent().unwrap())?;
+            let stream = Stream::new(*id).to_bytes()?.into_vec();
+            self.db.insert(id.as_bytes(), &stream[..])?;
+        }
+        let lock = self.lock_stream(id.clone())?;
+        if let Some(stream) = self.get_stream(&id)? {
+            Ok((stream.to_inner(), lock))
+        } else {
+            return Err(anyhow::anyhow!("stream doesn't exist"));
+        }
+    }
+
     fn lock_stream(&self, id: StreamId) -> Result<StreamLock> {
         if !self.locks.lock().insert(id) {
             return Err(anyhow::anyhow!("stream busy"));
@@ -99,20 +120,41 @@ impl StreamStorage {
 
     fn stream_path(&mut self, id: &StreamId) -> &Path {
         if !self.paths.contains_key(id) {
-            self.paths.insert(*id, self.dir.join(id.to_string()));
+            let path = self.dir
+                .join(id.doc().to_string())
+                .join(id.peer().to_string());
+            self.paths.insert(*id, path);
         }
         self.paths.get(id).unwrap()
     }
 
+    pub fn contains_doc(&self, doc: &DocId) -> Result<bool> {
+        Ok(self.docs.contains_key(doc.as_bytes())?)
+    }
+
+    pub fn docs(&self) -> impl Iterator<Item = Result<DocId>> {
+        self.docs
+            .iter()
+            .keys()
+            .map(|res| Ok(ZeroCopy::<DocId>::new(res?).to_inner()))
+    }
+
+    pub fn contains_stream(&self, id: &StreamId) -> Result<bool> {
+        Ok(self.streams.contains_key(id.as_bytes())?)
+    }
+
     pub fn streams(&self) -> impl Iterator<Item = Result<StreamId>> {
-        self.db
+        self.streams
             .iter()
             .keys()
             .map(|res| Ok(ZeroCopy::<StreamId>::new(res?).to_inner()))
     }
 
-    pub fn contains(&self, id: &StreamId) -> Result<bool> {
-        Ok(self.db.contains_key(id.as_bytes())?)
+    pub fn substreams(&self, doc: DocId) -> impl Iterator<Item = Result<StreamId>> {
+        self.streams
+            .scan_prefix(doc.as_bytes())
+            .keys()
+            .map(|res| Ok(ZeroCopy::<StreamId>::new(res?).to_inner()))
     }
 
     pub fn head(&self, id: &StreamId) -> Result<Option<Head>> {
@@ -124,39 +166,20 @@ impl StreamStorage {
         Ok(None)
     }
 
-    pub fn append(&mut self, stream: u64) -> Result<StreamWriter<Arc<Keypair>>> {
-        let peer = self.key.public.to_bytes();
-        let id = StreamId::new(peer, stream);
-        if !self.contains(&id)? {
-            let stream = Stream::new(id).to_bytes()?.into_vec();
-            self.db.insert(id.as_bytes(), &stream[..])?;
-        }
-        let lock = self.lock_stream(id.clone())?;
-        let stream = if let Some(stream) = self.get_stream(&id)? {
-            stream
-        } else {
-            return Err(anyhow::anyhow!("stream doesn't exist"));
-        };
+    pub fn append(&mut self, doc: DocId) -> Result<StreamWriter<Arc<Keypair>>> {
+        let id = StreamId::new(PeerId::from(self.key.public), doc);
+        let (stream, lock) = self.get_or_create_stream(&id)?;
         let db = self.db.clone();
         let key = self.key.clone();
         let path = self.stream_path(&id);
-        Ok(StreamWriter::new(path, stream.to_inner(), lock, db, key)?)
+        Ok(StreamWriter::new(path, stream, lock, db, key)?)
     }
 
     pub fn subscribe(&mut self, id: &StreamId) -> Result<StreamWriter<()>> {
-        if !self.contains(id)? {
-            let stream = Stream::new(*id).to_bytes()?.into_vec();
-            self.db.insert(id.as_bytes(), &stream[..])?;
-        }
-        let lock = self.lock_stream(id.clone())?;
-        let stream = if let Some(stream) = self.get_stream(id)? {
-            stream
-        } else {
-            return Err(anyhow::anyhow!("stream doesn't exist"));
-        };
+        let (stream, lock) = self.get_or_create_stream(id)?;
         let db = self.db.clone();
         let path = self.stream_path(id);
-        Ok(StreamWriter::new(path, stream.to_inner(), lock, db, ())?)
+        Ok(StreamWriter::new(path, stream, lock, db, ())?)
     }
 
     pub fn remove(&mut self, id: &StreamId) -> Result<()> {

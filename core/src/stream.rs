@@ -9,18 +9,103 @@ use std::sync::Arc;
 use zerocopy::{AsBytes, FromBytes};
 
 #[derive(Archive, Deserialize, Serialize, AsBytes, FromBytes, Clone, Copy, Eq, Hash, PartialEq)]
+#[archive(as = "DocId")]
+#[repr(C)]
+#[cfg_attr(feature = "serde-derive", derive(serde::Deserialize, serde::Serialize))]
+pub struct DocId(u128);
+
+impl std::fmt::Debug for DocId {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let mut doc_id = [0; 24];
+        base64::encode_config_slice(&self.0.to_be_bytes(), base64::URL_SAFE, &mut doc_id);
+        write!(f, "{}", std::str::from_utf8(&doc_id).expect("wtf?"))
+    }
+}
+
+impl std::fmt::Display for DocId {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+impl std::str::FromStr for DocId {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.len() != 24 {
+            return Err(anyhow::anyhow!("invalid doc_id length {}", s.len()));
+        }
+        let mut doc_id = [0; 16];
+        base64::decode_config_slice(s, base64::URL_SAFE, &mut doc_id)?;
+        Ok(Self(u128::from_be_bytes(doc_id)))
+    }
+}
+
+impl DocId {
+    pub fn unique() -> Self {
+        let mut bytes = [0; 16];
+        getrandom::getrandom(&mut bytes).expect("failed to get random bytes");
+        Self(u128::from_be_bytes(bytes))
+    }
+}
+
+#[derive(Archive, Deserialize, Serialize, AsBytes, FromBytes, Clone, Copy, Eq, Hash, PartialEq)]
+#[archive(as = "PeerId")]
+#[repr(C)]
+#[cfg_attr(feature = "serde-derive", derive(serde::Deserialize, serde::Serialize))]
+pub struct PeerId([u8; 32]);
+
+impl std::fmt::Debug for PeerId {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let mut peer_id = [0; 44];
+        base64::encode_config_slice(&self.0, base64::URL_SAFE, &mut peer_id);
+        write!(f, "{}", std::str::from_utf8(&peer_id).expect("wtf?"))
+    }
+}
+
+impl std::fmt::Display for PeerId {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+impl std::str::FromStr for PeerId {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.len() != 44 {
+            return Err(anyhow::anyhow!("invalid peer_id length {}", s.len()));
+        }
+        let mut peer_id = [0; 32];
+        base64::decode_config_slice(s, base64::URL_SAFE, &mut peer_id)?;
+        Ok(Self(peer_id))
+    }
+}
+
+impl From<PublicKey> for PeerId {
+    fn from(key: PublicKey) -> Self {
+        Self(key.to_bytes())
+    }
+}
+
+impl From<PeerId> for PublicKey {
+    fn from(peer_id: PeerId) -> Self {
+        PublicKey::from_bytes(&peer_id.0).unwrap()
+    }
+}
+
+#[derive(Archive, Deserialize, Serialize, AsBytes, FromBytes, Clone, Copy, Eq, Hash, PartialEq)]
 #[archive(as = "StreamId")]
 #[repr(C)]
 #[cfg_attr(feature = "serde-derive", derive(serde::Deserialize, serde::Serialize))]
 pub struct StreamId {
-    peer: [u8; 32],
-    stream: u64,
+    peer: PeerId,
+    doc: DocId,
 }
 
 impl std::fmt::Debug for StreamId {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        let peer = base64::encode_config(&self.peer, base64::URL_SAFE_NO_PAD);
-        write!(f, "{}.{}", peer, self.stream)
+        write!(f, "{}{}", self.peer, self.doc)
     }
 }
 
@@ -34,29 +119,27 @@ impl std::str::FromStr for StreamId {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let (peer, stream) = s
-            .split_once('.')
-            .ok_or(anyhow::anyhow!("invalid stream id"))?;
-        let mut bytes = base64::decode_config(peer, base64::URL_SAFE_NO_PAD)?;
-        bytes.resize(32, 0);
-        let mut peer = [0; 32];
-        peer.copy_from_slice(&bytes);
-        let stream = stream.parse()?;
-        Ok(Self { peer, stream })
+        if s.len() != 192 {
+            return Err(anyhow::anyhow!("invalid stream_id length {}", s.len()));
+        }
+        let (peer, doc) = s.split_at(128);
+        let peer = peer.parse()?;
+        let doc = doc.parse()?;
+        Ok(Self { peer, doc })
     }
 }
 
 impl StreamId {
-    pub fn new(peer: [u8; 32], stream: u64) -> Self {
-        Self { peer, stream }
+    pub fn new(peer: PeerId, doc: DocId) -> Self {
+        Self { peer, doc }
     }
 
-    pub fn peer(&self) -> PublicKey {
-        PublicKey::from_bytes(&self.peer).unwrap()
+    pub fn peer(&self) -> PeerId {
+        self.peer
     }
 
-    pub fn stream(&self) -> u64 {
-        self.stream
+    pub fn doc(&self) -> DocId {
+        self.doc
     }
 }
 
@@ -114,8 +197,8 @@ pub struct SignedHead {
 impl Default for SignedHead {
     fn default() -> Self {
         Self::new(StreamId {
-            peer: [0; 32],
-            stream: 0,
+            peer: PeerId([0; 32]),
+            doc: DocId(0),
         })
     }
 }
@@ -134,7 +217,7 @@ impl SignedHead {
             return Err(anyhow::anyhow!("missmatched stream id"));
         }
         let sig = Signature::from(self.sig);
-        id.peer().verify_strict(self.head.as_bytes(), &sig)?;
+        PublicKey::from(id.peer()).verify_strict(self.head.as_bytes(), &sig)?;
         Ok(())
     }
 }
@@ -148,16 +231,13 @@ impl SignedHead {
     }
 
     pub(crate) fn sign(&mut self, key: &Keypair) {
-        debug_assert_eq!(key.public, self.head.id().peer());
+        debug_assert_eq!(PeerId::from(key.public), self.head.id().peer());
         self.sig = key.sign(self.head.as_bytes()).to_bytes();
     }
 
     pub(crate) fn set_signature(&mut self, sig: [u8; 64]) -> Result<()> {
         let sig2 = Signature::from(sig);
-        self.head
-            .id()
-            .peer()
-            .verify_strict(self.head.as_bytes(), &sig2)?;
+        PublicKey::from(self.head.id().peer()).verify_strict(self.head.as_bytes(), &sig2)?;
         self.sig = sig;
         Ok(())
     }
@@ -238,7 +318,7 @@ mod tests {
     #[test]
     fn test_default_stream() {
         let (outboard, hash) = bao::encode::outboard(&[]);
-        let id = StreamId::new([0; 32], 42);
+        let id = StreamId::new(PeerId([0; 32]), DocId(42));
         let expect = Stream {
             head: SignedHead {
                 head: Head {

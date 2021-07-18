@@ -1,5 +1,5 @@
 use anyhow::Result;
-use blake_streams_core::{Slice, SliceBuffer, StreamStorage};
+use blake_streams_core::{DocId, Slice, SliceBuffer, StreamStorage};
 use ed25519_dalek::{Keypair, PublicKey, SecretKey};
 use rand::RngCore;
 use std::io::Write;
@@ -25,7 +25,7 @@ fn main() -> Result<()> {
     let data = rand_bytes(len as usize);
     let path = tmp.path().join("server");
     let mut server = StreamStorage::open(&path, keypair([0; 32]))?;
-    let mut stream = server.append(0)?;
+    let mut stream = server.append(DocId::unique())?;
     stream.write_all(&data)?;
     stream.flush()?;
     let head = stream.commit()?;

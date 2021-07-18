@@ -1,7 +1,7 @@
 pub use crate::buffer::{SliceBuffer, SliceInfo};
 pub use crate::read::StreamReader;
 pub use crate::store::StreamStorage;
-pub use crate::stream::{Head, SignedHead, Slice, Stream, StreamId};
+pub use crate::stream::{DocId, Head, PeerId, SignedHead, Slice, Stream, StreamId};
 pub use crate::write::StreamWriter;
 pub use bao::Hash;
 pub use ed25519_dalek::{Keypair, PublicKey, SecretKey};
@@ -41,7 +41,8 @@ mod tests {
         let mut storage = StreamStorage::open(tmp.path(), keypair([0; 32]))?;
         let data = rand_bytes(1_000_000);
 
-        let mut stream = storage.append(0)?;
+        let doc = DocId::unique();
+        let mut stream = storage.append(doc)?;
         stream.write_all(&data)?;
         stream.commit()?;
 
@@ -61,7 +62,8 @@ mod tests {
         let mut storage = StreamStorage::open(tmp.path(), keypair([0; 32]))?;
         let data = rand_bytes(1027);
 
-        let mut stream = storage.append(0)?;
+        let doc = DocId::unique();
+        let mut stream = storage.append(doc)?;
         stream.write_all(&data)?;
         stream.commit()?;
 
@@ -96,7 +98,8 @@ mod tests {
         let mut storage = StreamStorage::open(tmp.path(), keypair([0; 32]))?;
         let data = rand_bytes(8192);
 
-        let mut stream = storage.append(0)?;
+        let doc = DocId::unique();
+        let mut stream = storage.append(doc)?;
         stream.write_all(&data[..4096])?;
         let head1 = stream.commit()?;
         stream.write_all(&data[4096..])?;

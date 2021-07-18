@@ -1,60 +1,4 @@
 //! # Blake streams
-//!
-//! ## Local streams
-//!
-//! ```ignore
-//! # use anyhow::Result;
-//! # fn main() -> Result<()> {
-//! # let streams = StreamSync::open(path, key)?;
-//! let id = streams.create()?;
-//! // dht.provide(id)
-//! let stream = streams.append(&id)?;
-//! stream.write_all(b"hello world")?;
-//! let head = stream.commit()?;
-//! // gossip.publish(id, head)
-//! // dht.put_record(id, head)
-//! # Ok(()) }
-//! ```
-//!
-//! ## Replicated streams
-//!
-//! ```ignore
-//! # use anyhow::Result;
-//! # fn main() -> Result<()> {
-//! # let streams = StreamSync::open(path, key)?;
-//! # let id = StreamId::new([0; 32], 0);
-//! streams.subscribe(id)?;
-//! // let providers = dht.providers(id)
-//! # let providers = &[];
-//! streams.add_peers(id, providers);
-//! // let head = dht.get_record(id)
-//! streams.update_head(head);
-//! // let heads = gossip.subscribe(id)
-//! # let heads = futures::stream::empty();
-//! while let Some(head) = heads.next().await {
-//!     streams.update_head(head);
-//! }
-//! // dht.provide(id)
-//! # Ok(()) }
-//! ```
-//!
-//! ## Startup
-//!
-//! ```ignore
-//! # use anyhow::Result;
-//! # fn main() -> Result<()> {
-//! # let streams = StreamSync::open(path, key)?;
-//! for id in streams.streams() {
-//!     // dht.provide(id)
-//!     // gossip.subscribe(id)
-//!     // let providers = dht.providers(id)
-//!     # let providers = &[];
-//!     streams.add_peers(id, providers);
-//!     // let head = dht.get_record(id)
-//!     streams.update_head(head);
-//! }
-//! # Ok(()) }
-//! ```
 use anyhow::Result;
 use async_trait::async_trait;
 use blake_streams_core::{Slice, SliceBuffer, StreamStorage, StreamWriter};
@@ -80,7 +24,7 @@ use std::time::Duration;
 use zerocopy::{AsBytes, FromBytes, LayoutVerified};
 
 pub use blake_streams_core::{
-    Head, Keypair, PublicKey, SecretKey, SignedHead, StreamId, StreamReader,
+    DocId, Head, Keypair, PublicKey, SecretKey, SignedHead, StreamId, StreamReader,
 };
 pub type Channel = ResponseChannel<Slice>;
 
@@ -220,7 +164,6 @@ pub enum StreamSyncEvent {
 
 struct ReplicatedStream {
     buffer: SliceBuffer,
-    peers: Vec<PeerId>,
     head: SignedHead,
     sync: Option<SignedHead>,
 }
@@ -230,7 +173,6 @@ impl ReplicatedStream {
         let head = *buffer.head();
         Self {
             buffer,
-            peers: Default::default(),
             head,
             sync: None,
         }
@@ -241,6 +183,7 @@ pub struct StreamSync {
     inner: RequestResponse<StreamSyncCodec>,
     store: StreamStorage,
     streams: FnvHashMap<StreamId, ReplicatedStream>,
+    peers: FnvHashMap<DocId, Vec<PeerId>>,
     requests: FnvHashMap<RequestId, RequestState>,
     events: VecDeque<StreamSyncEvent>,
     slice_len: usize,
@@ -299,6 +242,7 @@ impl StreamSync {
             inner,
             store,
             streams: Default::default(),
+            peers: Default::default(),
             events: Default::default(),
             slice,
             slice_len: config.slice_len,
@@ -306,8 +250,16 @@ impl StreamSync {
         })
     }
 
+    pub fn docs(&mut self) -> Result<Vec<DocId>> {
+        self.store.docs().collect()
+    }
+
     pub fn streams(&mut self) -> Result<Vec<StreamId>> {
         self.store.streams().collect()
+    }
+
+    pub fn substreams(&mut self, doc: DocId) -> Result<Vec<StreamId>> {
+        self.store.substreams(doc).collect()
     }
 
     pub fn head(&mut self, id: &StreamId) -> Result<Option<Head>> {
@@ -322,7 +274,7 @@ impl StreamSync {
         self.store.remove(id)
     }
 
-    pub fn append(&mut self, id: u64) -> Result<LocalStreamWriter> {
+    pub fn append(&mut self, id: DocId) -> Result<LocalStreamWriter> {
         Ok(LocalStreamWriter {
             inner: self.store.append(id)?,
         })
@@ -335,30 +287,27 @@ impl StreamSync {
         Ok(())
     }
 
-    pub fn add_peers(&mut self, id: &StreamId, peers: impl Iterator<Item = PeerId>) {
+    pub fn add_peers(&mut self, id: DocId, new_peers: impl Iterator<Item = PeerId>) {
         // creates a deterministic unique order for each peer
         // by sorting the xored public keys.
         let key = self.store.public_key().to_bytes();
-        if let Some(stream) = self.streams.get_mut(id) {
-            stream.peers.extend(peers);
-            stream
-                .peers
-                .sort_unstable_by(|a, b| peer_id_xor(a, key).cmp(&peer_id_xor(b, key)));
-            stream.peers.dedup();
-            tracing::info!("{} has {} peers", id, stream.peers.len());
-        } else {
-            tracing::info!("add_peers: missing stream {}", id);
-        }
+        let peers = self.peers.entry(id).or_default();
+        peers.extend(new_peers);
+        peers
+            .sort_unstable_by(|a, b| peer_id_xor(a, key).cmp(&peer_id_xor(b, key)));
+        peers.dedup();
+        tracing::info!("doc {} has {} peers", id, peers.len());
     }
 
-    pub fn remove_peer(&mut self, id: &StreamId, peer: &PeerId) {
-        if let Some(stream) = self.streams.get_mut(id) {
-            stream.peers.retain(|p| p != peer);
+    pub fn remove_peer(&mut self, id: &DocId, peer: &PeerId) {
+        if let Some(peers) = self.peers.get_mut(id) {
+            peers.retain(|p| p != peer);
         }
     }
 
     pub fn update_head(&mut self, head: SignedHead) {
-        let stream = if let Some(stream) = self.streams.get_mut(head.head().id()) {
+        let stream_id = head.head().id();
+        let stream = if let Some(stream) = self.streams.get_mut(stream_id) {
             stream
         } else {
             tracing::error!("no stream");
@@ -373,7 +322,8 @@ impl StreamSync {
             return;
         }
         stream.head = head;
-        if stream.sync.is_none() && !stream.peers.is_empty() {
+        let has_peers = !self.peers.entry(stream_id.doc()).or_default().is_empty();
+        if stream.sync.is_none() && has_peers {
             self.start_sync(head);
         }
     }
@@ -405,7 +355,8 @@ impl StreamSync {
 
     fn request_slice(&mut self, state: RequestState) {
         let stream = self.streams.get(&state.stream).unwrap();
-        let peer = stream.peers[(state.slice_index + state.peer_index) % stream.peers.len()];
+        let peers = self.peers.get(&state.stream.doc()).unwrap();
+        let peer = peers[(state.slice_index + state.peer_index) % peers.len()];
         let slice = &stream.buffer.slices()[state.slice_index];
         let request = StreamSyncRequest {
             stream: state.stream,
@@ -716,14 +667,14 @@ mod tests {
         let mut client = build_swarm(tmp.path().join("client"), [1; 32], 65536)?;
 
         let data = rand_bytes(1024 * 1024);
-        let mut stream = server.behaviour_mut().append(0)?;
+        let mut stream = server.behaviour_mut().append(DocId::unique())?;
         stream.write_all(&data)?;
         let head = stream.commit()?;
 
         client.behaviour_mut().subscribe(head.head().id())?;
         client
             .behaviour_mut()
-            .add_peers(head.head().id(), std::iter::once(*server.local_peer_id()));
+            .add_peers(head.head().id().doc(), std::iter::once(*server.local_peer_id()));
         client.dial_addr("/memory/1".parse().unwrap())?;
 
         let mut start = None;
