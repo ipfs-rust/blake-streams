@@ -342,7 +342,7 @@ dependencies = [
  "anyhow",
  "async-global-executor",
  "async-std",
- "blake-streams-core",
+ "blake-streams-core 0.1.0",
  "futures",
  "ipfs-embed",
  "rand 0.8.4",
@@ -370,6 +370,25 @@ dependencies = [
  "serde-big-array",
  "sled",
  "tempdir",
+ "tracing",
+ "zerocopy",
+]
+
+[[package]]
+name = "blake-streams-core"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6f00a470483f082507fd96377e89383dfbbb60a77ecb4a5a6544e0efb562c642"
+dependencies = [
+ "anyhow",
+ "bao",
+ "base64 0.13.0",
+ "ed25519-dalek",
+ "fnv",
+ "getrandom 0.2.3",
+ "parking_lot",
+ "rkyv",
+ "sled",
  "tracing",
  "zerocopy",
 ]
@@ -1356,6 +1375,7 @@ dependencies = [
 [[package]]
 name = "ipfs-embed"
 version = "0.21.1"
+source = "git+https://github.com/ipfs-rust/ipfs-embed#5e2800ee7eaea60be046b42e7c0661b0c136b3ba"
 dependencies = [
  "anyhow",
  "async-global-executor",
@@ -1368,7 +1388,7 @@ dependencies = [
  "libipld",
  "libp2p",
  "libp2p-bitswap",
- "libp2p-blake-streams",
+ "libp2p-blake-streams 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "libp2p-broadcast",
  "libp2p-quic",
  "names",
@@ -1565,7 +1585,7 @@ dependencies = [
  "anyhow",
  "async-std",
  "async-trait",
- "blake-streams-core",
+ "blake-streams-core 0.1.0",
  "fnv",
  "futures",
  "libp2p",
@@ -1573,6 +1593,22 @@ dependencies = [
  "tempdir",
  "tracing",
  "tracing-subscriber",
+ "zerocopy",
+]
+
+[[package]]
+name = "libp2p-blake-streams"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2ec9bb69c746f1f6c61c352fae944971f29380d66b1b885b0299a28f1b4ad904"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "blake-streams-core 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "fnv",
+ "futures",
+ "libp2p",
+ "tracing",
  "zerocopy",
 ]
 

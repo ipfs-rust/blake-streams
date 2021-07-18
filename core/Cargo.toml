@@ -3,6 +3,9 @@ name = "blake-streams-core"
 version = "0.1.0"
 authors = ["David Craven <david@craven.ch>"]
 edition = "2018"
+description = "Performant authenticated replicated streams."
+repository = "https://github.com/ipfs-rust/blake-streams"
+license = "ISC"
 
 [features]
 serde-derive = ["serde", "serde-big-array"]
