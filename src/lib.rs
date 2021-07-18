@@ -1,7 +1,7 @@
 use anyhow::Result;
-use futures::channel::oneshot;
+use futures::channel::mpsc;
 use futures::prelude::*;
-use ipfs_embed::{Event, Key, LocalStreamWriter, Quorum, Record, SignedHead};
+use ipfs_embed::{Event, LocalStreamWriter, SignedHead};
 use std::io::{self, Write};
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -28,7 +28,7 @@ impl BlakeStreams {
         self.ipfs.streams()
     }
 
-    pub fn head(&self, id: &StreamId) -> Result<Option<Head>> {
+    pub fn head(&self, id: &StreamId) -> Result<Option<SignedHead>> {
         self.ipfs.stream_head(id)
     }
 
@@ -40,86 +40,110 @@ impl BlakeStreams {
         self.ipfs.stream_remove(id)
     }
 
-    pub async fn append(&self, id: DocId) -> Result<StreamWriter> {
-        let writer = self.ipfs.stream_append(id)?;
-        self.ipfs.provide(writer.head().id().doc().key()).await?;
-        // this unsubscribes immediately but the other peer gets a subscription event.
-        let _ = self.ipfs.subscribe(&writer.head().id().doc().topic())?;
-        Ok(StreamWriter {
-            inner: writer,
-            ipfs: self.ipfs.clone(),
-        })
-    }
-
-    pub fn add_stream(&self, id: &StreamId) -> Result<()> {
-        tracing::info!("adding stream {}", id);
+    pub fn link_stream(&self, id: &StreamId) -> Result<()> {
+        tracing::info!("{}: linking stream (peer {})", id.doc(), id.peer());
         self.ipfs.stream_subscribe(id)
     }
 
     pub async fn subscribe(&self, doc: DocId) -> Result<DocStream> {
-        tracing::info!("subscribing to {}", doc);
-        let dht_key = doc.key();
+        tracing::info!("{}: subscribe", doc);
         let events = self.ipfs.swarm_events();
-        let peers = self.ipfs.providers(dht_key.clone()).await?;
-        tracing::info!("found {} peers", peers.len());
-        self.ipfs.stream_add_peers(doc, peers.into_iter());
-        let mut stream = self.ipfs.subscribe(&doc.topic())?;
-        let records = self
-            .ipfs
-            .get_record(&dht_key, Quorum::One)
-            .await
-            .ok()
-            .unwrap_or_default();
-        for record in records {
-            if let Some(head) = LayoutVerified::<_, SignedHead>::new(&record.record.value[..]) {
-                tracing::info!("new head from dht {}", head.head().len());
-                self.ipfs.stream_update_head(*head);
-            }
-        }
+        let (mut tx, rx) = mpsc::channel(1);
+        let _ = tx.try_send(());
         let ipfs = self.ipfs.clone();
-        self.ipfs.provide(dht_key).await?;
-        let (exit_tx, mut exit_rx) = oneshot::channel();
-        async_global_executor::spawn(async move {
-            let exit = &mut exit_rx;
-            let mut events = ipfs.swarm_events();
-            loop {
-                futures::select! {
-                    _ = exit.fuse() => break,
-                    head = stream.next().fuse() => {
-                        if let Some(head) = head {
-                            match LayoutVerified::<_, SignedHead>::new(&head[..]) {
-                                Some(head) => {
-                                    tracing::info!("new head from gossip {}", head.head().len());
-                                    ipfs.stream_update_head(*head);
-                                }
-                                None => tracing::debug!("failed to decode head"),
-                            }
-                        }
-                    }
-                    event = events.next().fuse() => {
-                        if let Some(Event::Subscribed(peer_id, topic)) = event {
-                            if let Ok(id) = topic.parse() {
-                                tracing::info!("adding peer {}", peer_id);
-                                ipfs.stream_add_peers(id, std::iter::once(peer_id));
-                            }
-                        }
-                    }
-                }
-            }
-        })
+        async_global_executor::spawn(doc_task(
+            doc,
+            ipfs.swarm_events(),
+            ipfs.subscribe(&doc.to_string())?,
+            ipfs,
+            tx.clone(),
+            rx,
+        ))
         .detach();
         Ok(DocStream {
             doc,
+            ipfs: self.ipfs.clone(),
             events,
-            exit: Some(exit_tx),
+            publisher: tx,
         })
+    }
+}
+
+async fn doc_task(
+    doc: DocId,
+    mut events: SwarmEvents,
+    mut stream: impl Stream<Item = Vec<u8>> + Send + Unpin + 'static,
+    ipfs: Ipfs,
+    mut tx: mpsc::Sender<()>,
+    mut rx: mpsc::Receiver<()>,
+) {
+    let local_peer_id = ipfs.local_public_key().into();
+    loop {
+        futures::select! {
+            ev = rx.next().fuse() => {
+                match ev {
+                    Some(()) => {
+                        let head = match ipfs.stream_head(&StreamId::new(local_peer_id, doc)) {
+                            Ok(Some(head)) => head,
+                            Ok(None) => continue,
+                            Err(err) => {
+                                tracing::error!("fetching head err {}", err);
+                                continue;
+                            }
+                        };
+                        tracing::info!(
+                            "{}: publish_head (peer {}) (offset {})",
+                            doc,
+                            head.head().id().peer(),
+                            head.head().len(),
+                        );
+                        if let Err(err) = ipfs.publish(&doc.to_string(), head.as_bytes().to_vec()) {
+                            tracing::info!("publish error: {}", err);
+                        }
+                    }
+                    None => return,
+                }
+            }
+            head = stream.next().fuse() => {
+                if let Some(head) = head {
+                    match LayoutVerified::<_, SignedHead>::new(&head[..]) {
+                        Some(head) => {
+                            tracing::info!(
+                                "{}: new_head (peer {}) (offset {})",
+                                doc,
+                                head.head().id().peer(),
+                                head.head().len(),
+                            );
+                            ipfs.stream_update_head(*head);
+                        }
+                        None => tracing::debug!("gossip: failed to decode head"),
+                    }
+                }
+            }
+            event = events.next().fuse() => {
+                match event {
+                    Some(Event::Subscribed(peer_id, topic)) => {
+                        if let Ok(doc) = topic.parse() {
+                            tracing::info!("{}: new_peer (peer {})", doc, peer_id);
+                            ipfs.stream_add_peers(doc, std::iter::once(peer_id));
+                            let _ = tx.try_send(());
+                        }
+                    }
+                    Some(Event::Discovered(peer_id)) => {
+                        ipfs.dial(&peer_id);
+                    }
+                    _ => {}
+                }
+            }
+        }
     }
 }
 
 pub struct DocStream {
     doc: DocId,
+    ipfs: Ipfs,
     events: SwarmEvents,
-    exit: Option<oneshot::Sender<()>>,
+    publisher: mpsc::Sender<()>,
 }
 
 impl Stream for DocStream {
@@ -132,7 +156,7 @@ impl Stream for DocStream {
                     if head.id().doc() != self.doc {
                         continue;
                     }
-                    tracing::info!("sync complete {}", head.len());
+                    tracing::info!("{}: sync_complete (offset {})", self.doc, head.len());
                     Poll::Ready(Some(head))
                 }
                 Poll::Ready(None) => Poll::Ready(None),
@@ -143,33 +167,22 @@ impl Stream for DocStream {
     }
 }
 
-impl Drop for DocStream {
-    fn drop(&mut self) {
-        self.exit.take().unwrap().send(()).ok();
+impl DocStream {
+    pub fn append(&self) -> Result<DocWriter> {
+        let writer = self.ipfs.stream_append(self.doc)?;
+        Ok(DocWriter {
+            inner: writer,
+            publisher: self.publisher.clone(),
+        })
     }
 }
 
-trait DocIdExt {
-    fn key(&self) -> Key;
-    fn topic(&self) -> String;
-}
-
-impl DocIdExt for DocId {
-    fn key(&self) -> Key {
-        Key::new(&self.as_bytes())
-    }
-
-    fn topic(&self) -> String {
-        self.to_string()
-    }
-}
-
-pub struct StreamWriter {
+pub struct DocWriter {
     inner: LocalStreamWriter,
-    ipfs: Ipfs,
+    publisher: mpsc::Sender<()>,
 }
 
-impl StreamWriter {
+impl DocWriter {
     pub fn id(&self) -> &StreamId {
         self.inner.head().id()
     }
@@ -178,18 +191,14 @@ impl StreamWriter {
         self.inner.head()
     }
 
-    pub async fn commit(&mut self) -> Result<()> {
-        let head = self.inner.commit()?;
-        tracing::info!("publishing head {}", head.head().len());
-        self.ipfs
-            .publish(&self.id().doc().topic(), head.as_bytes().to_vec())?;
-        let record = Record::new(self.id().doc().key(), head.as_bytes().to_vec());
-        self.ipfs.put_record(record, Quorum::One).await?;
+    pub fn commit(&mut self) -> Result<()> {
+        self.inner.commit()?;
+        let _ = self.publisher.try_send(());
         Ok(())
     }
 }
 
-impl Write for StreamWriter {
+impl Write for DocWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.inner.write(buf)
     }
@@ -233,54 +242,7 @@ mod tests {
     }
 
     #[async_std::test]
-    async fn test_streams_kad() -> anyhow::Result<()> {
-        tracing_try_init();
-        let tmp = TempDir::new("test_streams")?;
-
-        let first = rand_bytes(8192);
-        let second = rand_bytes(8192);
-
-        let bootstrap = create_swarm(tmp.path().join("bootstrap")).await?;
-        let addr = bootstrap.ipfs().listeners()[0].clone();
-        let peer_id = bootstrap.ipfs().local_peer_id();
-        let nodes = [(peer_id, addr)];
-
-        let server = create_swarm(tmp.path().join("server")).await?;
-        server.ipfs().bootstrap(&nodes).await?;
-        let client = create_swarm(tmp.path().join("client")).await?;
-        client.ipfs().bootstrap(&nodes).await?;
-
-        let mut append = server.append(DocId::unique()).await?;
-        let id = *append.id();
-        append.write_all(&first)?;
-        append.commit().await?;
-
-        client.add_stream(&id)?;
-        let mut stream = client.subscribe(id.doc()).await?;
-
-        let head = stream.next().await.unwrap();
-        let mut buf = vec![];
-        client
-            .slice(head.id(), 0, head.len())?
-            .read_to_end(&mut buf)?;
-        assert_eq!(buf, first);
-
-        append.write_all(&second)?;
-        append.commit().await?;
-
-        let head2 = stream.next().await.unwrap();
-        let mut buf = vec![];
-        client
-            .slice(head2.id(), head.len(), head2.len() - head.len())?
-            .read_to_end(&mut buf)?;
-        assert_eq!(buf, second);
-
-        Ok(())
-    }
-
-    #[async_std::test]
-    #[ignore] // TODO
-    async fn test_streams_mdns() -> anyhow::Result<()> {
+    async fn test_streams() -> anyhow::Result<()> {
         tracing_try_init();
         let tmp = TempDir::new("test_streams")?;
 
@@ -290,13 +252,14 @@ mod tests {
         let server = create_swarm(tmp.path().join("server")).await?;
         let client = create_swarm(tmp.path().join("client")).await?;
 
-        let mut append = server.append(DocId::unique()).await?;
-        let id = *append.id();
+        let doc_id = DocId::unique();
+        let doc = server.subscribe(doc_id).await?;
+        let mut append = doc.append()?;
         append.write_all(&first)?;
-        append.commit().await?;
+        append.commit()?;
 
-        client.add_stream(&id)?;
-        let mut stream = client.subscribe(id.doc()).await?;
+        let mut stream = client.subscribe(doc_id).await?;
+        client.link_stream(append.id())?;
 
         let head = stream.next().await.unwrap();
         let mut buf = vec![];
@@ -306,7 +269,7 @@ mod tests {
         assert_eq!(buf, first);
 
         append.write_all(&second)?;
-        append.commit().await?;
+        append.commit()?;
 
         let head2 = stream.next().await.unwrap();
         let mut buf = vec![];

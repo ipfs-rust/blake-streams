@@ -1,5 +1,5 @@
 use crate::stream::StreamLock;
-use crate::{DocId, Head, PeerId, Slice, Stream, StreamId, StreamReader, StreamWriter};
+use crate::{DocId, PeerId, SignedHead, Slice, Stream, StreamId, StreamReader, StreamWriter};
 use anyhow::Result;
 use bao::encode::SliceExtractor;
 use ed25519_dalek::{Keypair, PublicKey};
@@ -120,7 +120,8 @@ impl StreamStorage {
 
     fn stream_path(&mut self, id: &StreamId) -> &Path {
         if !self.paths.contains_key(id) {
-            let path = self.dir
+            let path = self
+                .dir
                 .join(id.doc().to_string())
                 .join(id.peer().to_string());
             self.paths.insert(*id, path);
@@ -157,10 +158,10 @@ impl StreamStorage {
             .map(|res| Ok(ZeroCopy::<StreamId>::new(res?).to_inner()))
     }
 
-    pub fn head(&self, id: &StreamId) -> Result<Option<Head>> {
+    pub fn head(&self, id: &StreamId) -> Result<Option<SignedHead>> {
         if let Some(stream) = self.db.get(id.as_bytes())? {
             let stream = ZeroCopy::<Stream>::new(stream);
-            let head = stream.head.head().deserialize(&mut Infallible)?;
+            let head = stream.head.deserialize(&mut Infallible)?;
             return Ok(Some(head));
         }
         Ok(None)

@@ -262,7 +262,7 @@ impl StreamSync {
         self.store.substreams(doc).collect()
     }
 
-    pub fn head(&mut self, id: &StreamId) -> Result<Option<Head>> {
+    pub fn head(&mut self, id: &StreamId) -> Result<Option<SignedHead>> {
         self.store.head(id)
     }
 
@@ -293,8 +293,7 @@ impl StreamSync {
         let key = self.store.public_key().to_bytes();
         let peers = self.peers.entry(id).or_default();
         peers.extend(new_peers);
-        peers
-            .sort_unstable_by(|a, b| peer_id_xor(a, key).cmp(&peer_id_xor(b, key)));
+        peers.sort_unstable_by(|a, b| peer_id_xor(a, key).cmp(&peer_id_xor(b, key)));
         peers.dedup();
         tracing::info!("doc {} has {} peers", id, peers.len());
     }
@@ -672,9 +671,10 @@ mod tests {
         let head = stream.commit()?;
 
         client.behaviour_mut().subscribe(head.head().id())?;
-        client
-            .behaviour_mut()
-            .add_peers(head.head().id().doc(), std::iter::once(*server.local_peer_id()));
+        client.behaviour_mut().add_peers(
+            head.head().id().doc(),
+            std::iter::once(*server.local_peer_id()),
+        );
         client.dial_addr("/memory/1".parse().unwrap())?;
 
         let mut start = None;

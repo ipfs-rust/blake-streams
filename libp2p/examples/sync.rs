@@ -85,9 +85,10 @@ async fn main() -> Result<()> {
     let head = stream.commit()?;
 
     client.behaviour_mut().subscribe(head.head().id())?;
-    client
-        .behaviour_mut()
-        .add_peers(head.head().id().doc(), std::iter::once(*server.local_peer_id()));
+    client.behaviour_mut().add_peers(
+        head.head().id().doc(),
+        std::iter::once(*server.local_peer_id()),
+    );
     client.dial_addr("/memory/1".parse().unwrap())?;
 
     let mut start = None;
