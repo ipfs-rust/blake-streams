@@ -153,6 +153,7 @@ pub struct Head {
     pub id: StreamId,
     pub hash: [u8; 32],
     pub len: u64,
+    _padding: u64,
 }
 
 impl Head {
@@ -178,6 +179,7 @@ impl Head {
                 37, 201, 173, 193, 18, 183, 204, 154, 147, 202, 228, 31, 50, 98,
             ],
             len: 0,
+            _padding: 0,
         }
     }
 }
