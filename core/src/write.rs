@@ -10,7 +10,7 @@ use std::sync::Arc;
 use zerocopy::AsBytes;
 
 pub struct StreamWriter<T> {
-    db: sled::Db,
+    db: sled::Tree,
     _lock: StreamLock,
     file: File,
     encoder: Encoder<Cursor<Vec<u8>>>,
@@ -23,7 +23,7 @@ impl<T> StreamWriter<T> {
         path: &Path,
         stream: Stream,
         lock: StreamLock,
-        db: sled::Db,
+        db: sled::Tree,
         key: T,
     ) -> Result<Self> {
         tracing::debug!("opening stream {} {}", path.display(), stream.head.head.len);

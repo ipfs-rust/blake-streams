@@ -57,7 +57,7 @@ impl<T> From<&ZeroCopy<T>> for sled::IVec {
 }
 
 pub struct StreamStorage {
-    db: sled::Db,
+    _db: sled::Db,
     docs: sled::Tree,
     streams: sled::Tree,
     dir: PathBuf,
@@ -74,7 +74,7 @@ impl StreamStorage {
         let dir = dir.join("streams");
         std::fs::create_dir_all(&dir)?;
         Ok(Self {
-            db,
+            _db: db,
             docs,
             streams,
             dir,
@@ -89,7 +89,7 @@ impl StreamStorage {
     }
 
     fn get_stream(&self, id: &StreamId) -> Result<Option<ZeroCopy<Stream>>> {
-        if let Some(bytes) = self.db.get(id.as_bytes())? {
+        if let Some(bytes) = self.streams.get(id.as_bytes())? {
             Ok(Some(ZeroCopy::new(bytes)))
         } else {
             Ok(None)
@@ -101,7 +101,8 @@ impl StreamStorage {
             let path = self.stream_path(&id);
             std::fs::create_dir_all(path.parent().unwrap())?;
             let stream = Stream::new(*id).to_bytes()?.into_vec();
-            self.db.insert(id.as_bytes(), &stream[..])?;
+            self.docs.insert(id.doc().as_bytes(), &[])?;
+            self.streams.insert(id.as_bytes(), &stream[..])?;
         }
         let lock = self.lock_stream(id.clone())?;
         if let Some(stream) = self.get_stream(&id)? {
@@ -159,7 +160,7 @@ impl StreamStorage {
     }
 
     pub fn head(&self, id: &StreamId) -> Result<Option<SignedHead>> {
-        if let Some(stream) = self.db.get(id.as_bytes())? {
+        if let Some(stream) = self.streams.get(id.as_bytes())? {
             let stream = ZeroCopy::<Stream>::new(stream);
             let head = stream.head.deserialize(&mut Infallible)?;
             return Ok(Some(head));
@@ -170,7 +171,7 @@ impl StreamStorage {
     pub fn append(&mut self, doc: DocId) -> Result<StreamWriter<Arc<Keypair>>> {
         let id = StreamId::new(PeerId::from(self.key.public), doc);
         let (stream, lock) = self.get_or_create_stream(&id)?;
-        let db = self.db.clone();
+        let db = self.streams.clone();
         let key = self.key.clone();
         let path = self.stream_path(&id);
         Ok(StreamWriter::new(path, stream, lock, db, key)?)
@@ -178,7 +179,7 @@ impl StreamStorage {
 
     pub fn subscribe(&mut self, id: &StreamId) -> Result<StreamWriter<()>> {
         let (stream, lock) = self.get_or_create_stream(id)?;
-        let db = self.db.clone();
+        let db = self.streams.clone();
         let path = self.stream_path(id);
         Ok(StreamWriter::new(path, stream, lock, db, ())?)
     }
@@ -188,7 +189,7 @@ impl StreamStorage {
         // this is safe to do on linux as long as there are only readers.
         // the file will be deleted after the last reader is dropped.
         std::fs::remove_file(self.stream_path(id))?;
-        self.db.remove(id.as_bytes())?;
+        self.streams.remove(id.as_bytes())?;
         Ok(())
     }
 

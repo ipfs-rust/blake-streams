@@ -24,8 +24,8 @@ impl BlakeStreams {
         &self.ipfs
     }
 
-    pub fn streams(&self) -> Result<Vec<StreamId>> {
-        self.ipfs.streams()
+    pub fn streams(&self, doc: DocId) -> Result<Vec<StreamId>> {
+        self.ipfs.substreams(doc)
     }
 
     pub fn head(&self, id: &StreamId) -> Result<Option<SignedHead>> {
@@ -100,7 +100,10 @@ async fn doc_task(
                         tracing::info!("publish error: {}", err);
                     }
                 }
-                None => return,
+                None => {
+                    tracing::info!("exiting doc task");
+                    return;
+                }
             },
             ev = stream.next().fuse() => match ev {
                 Some(GossipEvent::Message(_, head)) => {
@@ -167,6 +170,12 @@ impl DocStream {
             inner: writer,
             publisher: self.publisher.clone(),
         })
+    }
+}
+
+impl Drop for DocStream {
+    fn drop(&mut self) {
+        self.publisher.close_channel();
     }
 }
 

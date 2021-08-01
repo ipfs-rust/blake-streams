@@ -149,6 +149,15 @@ mod tests {
         stream.read_to_end(&mut data2)?;
         assert_eq!(data, data2);
 
+        let docs = storage.docs().collect::<Result<Vec<_>>>()?;
+        assert!(!docs.is_empty());
+        let streams = storage.streams().collect::<Result<Vec<_>>>()?;
+        assert!(!streams.is_empty());
+        let substreams = storage
+            .substreams(stream.id().doc())
+            .collect::<Result<Vec<_>>>()?;
+        assert!(!substreams.is_empty());
+
         Ok(())
     }
 }

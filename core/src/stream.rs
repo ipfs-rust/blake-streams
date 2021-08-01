@@ -99,13 +99,13 @@ impl From<PeerId> for PublicKey {
 #[repr(C)]
 #[cfg_attr(feature = "serde-derive", derive(serde::Deserialize, serde::Serialize))]
 pub struct StreamId {
-    peer: PeerId,
     doc: DocId,
+    peer: PeerId,
 }
 
 impl std::fmt::Debug for StreamId {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{}{}", self.peer, self.doc)
+        write!(f, "{}{}", self.doc, self.peer)
     }
 }
 
@@ -119,13 +119,13 @@ impl std::str::FromStr for StreamId {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s.len() != 192 {
+        if s.len() != 68 {
             return Err(anyhow::anyhow!("invalid stream_id length {}", s.len()));
         }
-        let (peer, doc) = s.split_at(128);
-        let peer = peer.parse()?;
+        let (doc, peer) = s.split_at(24);
         let doc = doc.parse()?;
-        Ok(Self { peer, doc })
+        let peer = peer.parse()?;
+        Ok(Self { doc, peer })
     }
 }
 
@@ -134,12 +134,12 @@ impl StreamId {
         Self { peer, doc }
     }
 
-    pub fn peer(&self) -> PeerId {
-        self.peer
-    }
-
     pub fn doc(&self) -> DocId {
         self.doc
+    }
+
+    pub fn peer(&self) -> PeerId {
+        self.peer
     }
 }
 
@@ -327,6 +327,7 @@ mod tests {
                     id,
                     hash: *hash.as_bytes(),
                     len: 0,
+                    _padding: 0,
                 },
                 sig: [0; 64],
             },
@@ -334,5 +335,12 @@ mod tests {
         };
         let actual = Stream::new(id);
         assert_eq!(actual, expect);
+    }
+
+    #[test]
+    fn test_encode_decode_stream_id() {
+        let id = StreamId::new(PeerId([0; 32]), DocId(42));
+        let id2 = id.to_string().parse().unwrap();
+        assert_eq!(id, id2);
     }
 }
