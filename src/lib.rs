@@ -1,7 +1,7 @@
 use anyhow::Result;
 use futures::channel::mpsc;
 use futures::prelude::*;
-use ipfs_embed::{Event, LocalStreamWriter, SignedHead};
+use ipfs_embed::{Event, GossipEvent, LocalStreamWriter, SignedHead};
 use std::io::{self, Write};
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -72,7 +72,7 @@ impl BlakeStreams {
 async fn doc_task(
     doc: DocId,
     mut events: SwarmEvents,
-    mut stream: impl Stream<Item = Vec<u8>> + Send + Unpin + 'static,
+    mut stream: impl Stream<Item = GossipEvent> + Send + Unpin + 'static,
     ipfs: Ipfs,
     mut tx: mpsc::Sender<()>,
     mut rx: mpsc::Receiver<()>,
@@ -80,32 +80,30 @@ async fn doc_task(
     let local_peer_id = ipfs.local_public_key().into();
     loop {
         futures::select! {
-            ev = rx.next().fuse() => {
-                match ev {
-                    Some(()) => {
-                        let head = match ipfs.stream_head(&StreamId::new(local_peer_id, doc)) {
-                            Ok(Some(head)) => head,
-                            Ok(None) => continue,
-                            Err(err) => {
-                                tracing::error!("fetching head err {}", err);
-                                continue;
-                            }
-                        };
-                        tracing::info!(
-                            "{}: publish_head (peer {}) (offset {})",
-                            doc,
-                            head.head().id().peer(),
-                            head.head().len(),
-                        );
-                        if let Err(err) = ipfs.publish(&doc.to_string(), head.as_bytes().to_vec()) {
-                            tracing::info!("publish error: {}", err);
+            ev = rx.next().fuse() => match ev {
+                Some(()) => {
+                    let head = match ipfs.stream_head(&StreamId::new(local_peer_id, doc)) {
+                        Ok(Some(head)) => head,
+                        Ok(None) => continue,
+                        Err(err) => {
+                            tracing::error!("fetching head err {}", err);
+                            continue;
                         }
+                    };
+                    tracing::info!(
+                        "{}: publish_head (peer {}) (offset {})",
+                        doc,
+                        head.head().id().peer(),
+                        head.head().len(),
+                    );
+                    if let Err(err) = ipfs.publish(&doc.to_string(), head.as_bytes().to_vec()) {
+                        tracing::info!("publish error: {}", err);
                     }
-                    None => return,
                 }
-            }
-            head = stream.next().fuse() => {
-                if let Some(head) = head {
+                None => return,
+            },
+            ev = stream.next().fuse() => match ev {
+                Some(GossipEvent::Message(_, head)) => {
                     match LayoutVerified::<_, SignedHead>::new(&head[..]) {
                         Some(head) => {
                             tracing::info!(
@@ -119,21 +117,16 @@ async fn doc_task(
                         None => tracing::debug!("gossip: failed to decode head"),
                     }
                 }
-            }
-            event = events.next().fuse() => {
-                match event {
-                    Some(Event::Subscribed(peer_id, topic)) => {
-                        if let Ok(doc) = topic.parse() {
-                            tracing::info!("{}: new_peer (peer {})", doc, peer_id);
-                            ipfs.stream_add_peers(doc, std::iter::once(peer_id));
-                            let _ = tx.try_send(());
-                        }
-                    }
-                    Some(Event::Discovered(peer_id)) => {
-                        ipfs.dial(&peer_id);
-                    }
-                    _ => {}
+                Some(GossipEvent::Subscribed(peer_id)) => {
+                    tracing::info!("{}: new_peer (peer {})", doc, peer_id);
+                    ipfs.stream_add_peers(doc, std::iter::once(peer_id));
+                    let _ = tx.try_send(());
                 }
+                _ => {}
+            },
+            ev = events.next().fuse() => match ev {
+                Some(Event::Discovered(peer_id)) => ipfs.dial(&peer_id),
+                _ => {}
             }
         }
     }
