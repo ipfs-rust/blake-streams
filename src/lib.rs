@@ -24,6 +24,10 @@ impl BlakeStreams {
         &self.ipfs
     }
 
+    pub fn docs(&self) -> Result<Vec<DocId>> {
+        self.ipfs.docs()
+    }
+
     pub fn streams(&self, doc: DocId) -> Result<Vec<StreamId>> {
         self.ipfs.substreams(doc)
     }
